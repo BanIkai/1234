@@ -17,8 +17,8 @@
 #define PIN_LINE_L  A2   // sensor เส้นซ้าย
 #define PIN_LINE_R  A7   // sensor เส้นขวา
 
-#define LINE_L_TH  500   // ค่า threshold ซ้าย  (> = เจอเส้นขาว)
-#define LINE_R_TH  500   // ค่า threshold ขวา  (> = เจอเส้นขาว)
+#define LINE_L_TH  920   // ค่า threshold ซ้าย  (> = เจอเส้นขาว)
+#define LINE_R_TH  60   // ค่า threshold ขวา  (> = เจอเส้นขาว)
 
 
 // ── ขา XSHUT ของ ToF แต่ละตัว ───────────────────────────────
@@ -41,8 +41,8 @@
 
 // ── ระยะที่ใช้ตัดสินใจ (หน่วย mm) ──────────────────────────
 #define RAM_DIST    180   // ระยะพุ่งชน   — ถ้าศัตรูใกล้กว่านี้ให้พุ่ง
-#define TRACK_DIST  350   // ระยะติดตาม   — เห็นศัตรูแต่ยังไม่ถึงพุ่ง
-#define SIDE_DIST   250   // ระยะ sensor ข้าง ที่ถือว่าเห็นศัตรู
+#define TRACK_DIST  300   // ระยะติดตาม   — เห็นศัตรูแต่ยังไม่ถึงพุ่ง
+#define SIDE_DIST   200   // ระยะ sensor ข้าง ที่ถือว่าเห็นศัตรู
 
 
 // ── ความเร็ว (0–255) ────────────────────────────────────────
@@ -52,10 +52,10 @@
 #define TRACK_FAST    220   // ติดตาม — ด้านที่หันหาศัตรู
 #define TRACK_SLOW    130   // ติดตาม — ด้านตรงข้าม (เลี้ยว)
 
-#define SEARCH_SPEED  170   // หมุนค้นหาศัตรู (ช้า)
-#define SEARCH_FAST   220   // หมุนค้นหาหลังจาก lock ตัวได้ (เร็ว)
+#define SEARCH_SPEED  100   // หมุนค้นหาศัตรู (ช้า)
+#define SEARCH_FAST   120   // หมุนค้นหาหลังจาก lock ตัวได้ (เร็ว)
 
-#define ESCAPE_BACK   255   // ถอยหลังหนีเส้น
+#define ESCAPE_BACK   200   // ถอยหลังหนีเส้น
 #define ESCAPE_TURN   200   // หมุนกลับเข้าสนาม
 
 
