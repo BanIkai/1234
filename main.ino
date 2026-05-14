@@ -10,6 +10,8 @@ void setup() {
   Motors::begin();    // เริ่มต้น pin มอเตอร์
   Sensors::begin();   // เริ่มต้น ToF × 5 + sensor เส้น
   AI::reset();        // reset สถานะ AI
+
+  delay(5000);        // รอ 5 วิ ตามกติกา WRS ก่อนเริ่มเคลื่อนที่
 }
 
 void loop() {

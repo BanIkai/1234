@@ -127,7 +127,10 @@ void AI::run(Dist dist, Line line) {
   //  STEP 1 — ตรวจเส้น (ความสำคัญสูงสุด)
   //           ถ้าเจอเส้นตอนไหนก็ได้ → เริ่ม escape ทันที
   // ===========================================================
-  if (line.left || line.right) {
+  // แก้: เริ่ม escape ใหม่ได้เฉพาะตอน IDLE เท่านั้น
+  // ถ้าไม่ check escapeState == IDLE → escapeTimer จะ reset ซ้ำทุก loop
+  // ตราบใดที่ sensor ยังเห็นเส้น → หนีไม่สำเร็จ
+  if ((line.left || line.right) && escapeState == IDLE) {
     escapeState = ESCAPE_BACK;
     escapeLeft  = line.left;     // จำว่าเจอซ้ายหรือขวา
     escapeTimer = millis();
