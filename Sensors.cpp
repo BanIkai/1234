@@ -100,7 +100,7 @@ Line Sensors::readLine() {
   Line l;
   l.leftRaw  = analogRead(PIN_LINE_L);
   l.rightRaw = analogRead(PIN_LINE_R);
-  l.left     = l.leftRaw  > LINE_L_TH;   // เกิน threshold = เจอเส้น
-  l.right    = l.rightRaw > LINE_R_TH;
+  l.left     = l.leftRaw  < LINE_L_TH;   // เกิน threshold = เจอเส้น
+  l.right    = l.rightRaw < LINE_R_TH;
   return l;
 }
