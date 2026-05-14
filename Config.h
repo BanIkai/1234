@@ -1,72 +1,126 @@
 #pragma once
+#include <Arduino.h>
 
-// ============================================================
+// =============================================================================
 //  Config.h — ค่าคงที่ทั้งหมดของหุ่นยนต์ซูโม่
-//  แก้ค่าที่นี่จุดเดียวเพื่อปรับพฤติกรรมหุ่น
-// ============================================================
+//  แก้ไขที่นี่เพื่อปรับพฤติกรรมของหุ่น โดยไม่ต้องแตะไฟล์อื่น
+// =============================================================================
 
+// --- ขา XSHUT ของเซ็นเซอร์วัดระยะ (VL53L0X) ---
+// แต่ละตัวต้องการขาแยกเพื่อให้ตื่นทีละตัวและตั้งค่า I2C address
+constexpr uint8_t PIN_XSHUT_SL = 8;   // ซ้ายสุด  (Side Left)
+constexpr uint8_t PIN_XSHUT_FL = 12;  // หน้าซ้าย (Front Left)
+constexpr uint8_t PIN_XSHUT_FC = 4;   // หน้ากลาง (Front Center)
+constexpr uint8_t PIN_XSHUT_FR = 2;   // หน้าขวา  (Front Right)
+constexpr uint8_t PIN_XSHUT_SR = 7;   // ขวาสุด   (Side Right)
 
-// ── ขา Motor ────────────────────────────────────────────────
-#define PIN_L1  11   // มอเตอร์ซ้าย  ไปข้างหน้า
-#define PIN_L2  10   // มอเตอร์ซ้าย  ถอยหลัง
-#define PIN_R1   5   // มอเตอร์ขวา  ไปข้างหน้า
-#define PIN_R2   6   // มอเตอร์ขวา  ถอยหลัง
+// --- ที่อยู่ I2C ของเซ็นเซอร์แต่ละตัว ---
+// ค่า default ทุกตัวเหมือนกัน จึงต้องกำหนดใหม่ทีละตัวตอน initToF()
+constexpr uint8_t TOF_ADDR_SL = 0x30;
+constexpr uint8_t TOF_ADDR_FL = 0x31;
+constexpr uint8_t TOF_ADDR_FC = 0x32;
+constexpr uint8_t TOF_ADDR_FR = 0x33;
+constexpr uint8_t TOF_ADDR_SR = 0x34;
 
+// --- ขาเซ็นเซอร์ตรวจเส้น (อ่านค่า analogRead) ---
+constexpr uint8_t PIN_LINE_L = A7;  // ซ้าย
+constexpr uint8_t PIN_LINE_R = A2;  // ขวา
 
-// ── ขา Sensor เส้น (Line Sensor) ────────────────────────────
-#define PIN_LINE_L  A2   // sensor เส้นซ้าย
-#define PIN_LINE_R  A7   // sensor เส้นขวา
+// --- ขาปุ่ม Start และ Kill ---
+constexpr uint8_t PIN_START_EXT = A0;  // สัญญาณ Start ภายนอก (HIGH = เริ่ม)
+constexpr uint8_t PIN_START_BTN = A1;  // ปุ่มกด (active-low, ใช้ INPUT_PULLUP)
+constexpr uint8_t PIN_KILL      = 3;   // ขา Kill interrupt (INT1 บน Nano)
 
-#define LINE_L_TH  500   // ค่า threshold ซ้าย  (> = เจอเส้นขาว)
-#define LINE_R_TH  500   // ค่า threshold ขวา  (> = เจอเส้นขาว)
+// --- ขามอเตอร์ (ไดรเวอร์ A4950) ---
+// ช่อง A = มอเตอร์ขวา, ช่อง B = มอเตอร์ซ้าย
+// IN1 = ทิศทางบวก, IN2 = ทิศทางลบ
+constexpr uint8_t PIN_RIGHT_IN1 = 6;
+constexpr uint8_t PIN_RIGHT_IN2 = 5;
+constexpr uint8_t PIN_LEFT_IN1  = 10;
+constexpr uint8_t PIN_LEFT_IN2  = 11;
 
+// =============================================================================
+//  ระยะทาง (หน่วย mm)
+// =============================================================================
 
-// ── ขา XSHUT ของ ToF แต่ละตัว ───────────────────────────────
-//   SL = Side Left, FL = Front Left, FC = Front Center
-//   FR = Front Right, SR = Side Right
-#define PIN_XSHUT_SL  13
-#define PIN_XSHUT_FL  12
-#define PIN_XSHUT_FC   4
-#define PIN_XSHUT_FR   2
-#define PIN_XSHUT_SR   3
+// ระยะที่ถือว่า "เห็น" คู่ต่อสู้ — เริ่มไล่ตาม
+constexpr uint16_t ENGAGE_DISTANCE = 700;
 
+// ระยะที่ถือว่า "ชนแล้ว" — ออกแรงเต็มที่
+constexpr uint16_t RAM_DISTANCE = 200;
 
-// ── I2C Address ของ ToF แต่ละตัว ────────────────────────────
-#define ADDR_SL  0x30
-#define ADDR_FL  0x31
-#define ADDR_FC  0x32
-#define ADDR_FR  0x33
-#define ADDR_SR  0x34
+// ค่าระยะสูงสุดที่เชื่อได้ — ถ้าไกลกว่านี้ถือว่า "ไม่เห็นอะไร"
+constexpr uint16_t TOF_NO_TARGET = 800;
 
+// =============================================================================
+//  การป้องกัน "แบนเนอร์" (ไม้คันเบ็ดที่คู่ต่อสู้บางทีใช้หลอกเซ็นเซอร์)
+//  เซ็นเซอร์ด้านข้างอาจเห็นแบนเนอร์ก่อนเห็นตัวจริง
+//  เราจะ "เชื่อ" ว่าเป็นภัยด้านข้างก็ต่อเมื่อผ่านเงื่อนไขทั้งหมดนี้:
+// =============================================================================
 
-// ── ระยะที่ใช้ตัดสินใจ (หน่วย mm) ──────────────────────────
-#define RAM_DIST    180   // ระยะพุ่งชน   — ถ้าศัตรูใกล้กว่านี้ให้พุ่ง
-#define TRACK_DIST  350   // ระยะติดตาม   — เห็นศัตรูแต่ยังไม่ถึงพุ่ง
-#define SIDE_DIST   250   // ระยะ sensor ข้าง ที่ถือว่าเห็นศัตรู
+// ด้านข้างต้องใกล้กว่า X mm
+constexpr uint16_t FLANK_CLOSE_MM = 200;
 
+// ด้านข้างต้องใกล้กว่าเซ็นเซอร์หน้าทุกตัว อีก X mm (กรองแบนเนอร์)
+constexpr uint16_t FLANK_LEAD_MM = 150;
 
-// ── ความเร็ว (0–255) ────────────────────────────────────────
-#define MAX_SPEED     255
+// ต้องเห็นสัญญาณนี้ต่อเนื่องอย่างน้อย X ms ก่อนตอบสนอง
+constexpr uint16_t FLANK_PERSIST_MS = 60;
 
-#define ATTACK_SPEED  255   // พุ่งชนเต็มสปีด
-#define TRACK_FAST    220   // ติดตาม — ด้านที่หันหาศัตรู
-#define TRACK_SLOW    130   // ติดตาม — ด้านตรงข้าม (เลี้ยว)
+// FC ต้องใกล้กว่า FL/FR อีก X mm — มิฉะนั้นถือว่า FL/FR เห็นแค่แบนเนอร์
+constexpr uint16_t FC_BIAS_MM = 150;
 
-#define SEARCH_SPEED  170   // หมุนค้นหาศัตรู (ช้า)
-#define SEARCH_FAST   220   // หมุนค้นหาหลังจาก lock ตัวได้ (เร็ว)
+// =============================================================================
+//  เกณฑ์เซ็นเซอร์ตรวจเส้น (คาลิเบรตไว้ล่วงหน้า ไม่ calibrate ตอน boot)
+//  analogRead > threshold = เห็นเส้นขาว, ปรับตามพื้นสนามจริง
+// =============================================================================
+constexpr int LINE_L_THRESHOLD = 600;
+constexpr int LINE_R_THRESHOLD = 600;
 
-#define ESCAPE_BACK   255   // ถอยหลังหนีเส้น
-#define ESCAPE_TURN   200   // หมุนกลับเข้าสนาม
+// =============================================================================
+//  ระดับ PWM ของมอเตอร์ (0–255)
+// =============================================================================
+constexpr uint8_t RAM_PWM        = 255;  // พุ่งชน — เต็มพิกัด
+constexpr uint8_t FORWARD_PWM    = 200;  // ไล่ตรง
+constexpr uint8_t TURN_PWM       = 200;  // หมุนทั้งตัว
+constexpr uint8_t SEARCH_PWM     = 160;  // หมุนค้นหา (ช้ากว่าเพื่อประหยัดกำลัง)
+constexpr uint8_t CURVE_FAST_PWM = 220;  // ล้อเร็ว ขณะเลี้ยว
+constexpr uint8_t CURVE_SLOW_PWM = 120;  // ล้อช้า ขณะเลี้ยว
 
+// =============================================================================
+//  ตรวจจับการ "ติดขัด" (stall) ขณะกด — ใช้เพื่อเบรกเปลี่ยนทิศ
+// =============================================================================
+constexpr uint16_t STALL_NEAR_MM    = 150;  // FC ใกล้กว่านี้ถึงจะนับ stall
+constexpr uint16_t STALL_DELTA_MM   = 15;   // ถ้าระยะเปลี่ยนน้อยกว่านี้ = ติดขัด
+constexpr uint16_t STALL_WINDOW_MS  = 120;  // ช่วงเวลาที่ใช้ตรวจ
+constexpr uint16_t STALL_RELEASE_MM = 350;  // ไกลกว่านี้ถือว่าหลุดออกแล้ว
+constexpr uint16_t STALL_RELEASE_MS = 80;   // ต้องอยู่ไกลนาน X ms ถึงถือว่าหลุดจริง
 
-// ── เวลา (หน่วย ms) ─────────────────────────────────────────
-#define ESCAPE_BACK_MS   180   // ระยะเวลาถอยหลัง
-#define ESCAPE_TURN_MS   220   // ระยะเวลาหมุนกลับ
+// =============================================================================
+//  เวลา (หน่วย ms)
+// =============================================================================
+constexpr uint16_t LINE_REVERSE_MS  = 180;  // ถอยหลังเมื่อเห็นเส้น
+constexpr uint16_t LINE_TURN_MS     = 250;  // หมุน ~120 องศา
+constexpr uint16_t LINE_180_MS      = 380;  // หมุน 180 องศา (เห็นเส้นทั้งสองข้าง)
+constexpr uint16_t START_DELAY_MS   = 10;   // หน่วงก่อนออกตัว (มาตรฐานซูโม่ = 5 s)
+constexpr uint16_t BTN_DEBOUNCE_MS  = 30;   // debounce ปุ่ม
+constexpr uint16_t ANTI_FLANK_MS    = 300;  // หมุนหนีภัยด้านข้าง
 
-#define LOCK_TIME        350   // ล็อก target ไว้นานแค่ไหน ก่อนสูญเสีย
-#define SEARCH_SWAP_MS   700   // สลับทิศค้นหาทุกกี่ ms
+// =============================================================================
+//  ค่าตั้งเซ็นเซอร์ VL53L0X
+// =============================================================================
+constexpr uint32_t TOF_TIMING_BUDGET_US = 20000;  // 20 ms = โหมดความเร็วสูง
+constexpr uint32_t I2C_CLOCK_HZ         = 400000; // I2C Fast Mode
 
+// =============================================================================
+//  Debug flags — เปลี่ยนเป็น 1 เพื่อเปิด
+// =============================================================================
+// พิมพ์ state + ระยะทางทาง Serial @ 115200
+#define SUMO_DEBUG      0
 
-// ── ToF ─────────────────────────────────────────────────────
-#define TOF_TIMEOUT   20    // timeout ของ sensor ToF (ms)
-#define NO_TARGET    999    // ค่าที่แทน "ไม่มีเป้าหมาย"
+// กระตุกมอเตอร์สั้น ๆ ใน setup() เพื่อทดสอบการต่อสาย
+#define DEBUG_MOTOR_TEST 0
+
+// ติดตามการ bring-up เซ็นเซอร์ VL53L0X ทาง Serial + LED
+// (LED กระพริบ N ครั้ง = เซ็นเซอร์ตัวที่ N ค้าง โดย SL=1, FL=2, FC=3, FR=4, SR=5)
+#define VL53L0X_DEBUG   1

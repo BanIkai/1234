@@ -1,37 +1,38 @@
 #pragma once
+#include <Arduino.h>
 
-// ============================================================
-//  Sensors.h — โครงสร้างข้อมูลและ API อ่านค่า Sensor
-// ============================================================
+// =============================================================================
+//  Sensors.h — โครงสร้างข้อมูลและ API ของเซ็นเซอร์ทั้งหมด
+// =============================================================================
 
-// ── ข้อมูลระยะจาก ToF ทั้ง 5 ตัว (หน่วย mm) ────────────────
-//   NO_TARGET (999) = ไม่เจอเป้า หรือ timeout
-struct Dist {
-  int sl;   // Side  Left  — ด้านข้างซ้าย
-  int fl;   // Front Left  — หน้าซ้าย
-  int fc;   // Front Center— หน้ากลาง
-  int fr;   // Front Right — หน้าขวา
-  int sr;   // Side  Right — ด้านข้างขวา
+// ระยะทาง (mm) จากเซ็นเซอร์วัดระยะ VL53L0X ทั้ง 5 ตัว
+// ถ้าไม่มีเป้าหมาย / วัดไม่ได้ → ค่าจะเท่ากับ TOF_NO_TARGET
+struct ToFReadings {
+  uint16_t sl;  // Side Left  — ด้านข้างซ้าย
+  uint16_t fl;  // Front Left  — หน้าซ้าย
+  uint16_t fc;  // Front Center — หน้ากลาง (ตัวบ่งชี้หลัก)
+  uint16_t fr;  // Front Right — หน้าขวา
+  uint16_t sr;  // Side Right  — ด้านข้างขวา
 };
 
-// ── ข้อมูล sensor เส้น ──────────────────────────────────────
-//   left/right = true  หมายถึง "เจอเส้นขาว" (ออกนอกสนาม)
-struct Line {
-  bool left;      // เจอเส้นซ้าย?
-  bool right;     // เจอเส้นขวา?
-  int  leftRaw;   // ค่าดิบ analogRead ซ้าย
-  int  rightRaw;  // ค่าดิบ analogRead ขวา
+// ผลการอ่านเซ็นเซอร์ตรวจเส้น
+struct LineReadings {
+  bool left_white;   // true = เซ็นเซอร์ซ้ายเห็นเส้นขาว (ขอบสนาม)
+  bool right_white;  // true = เซ็นเซอร์ขวาเห็นเส้นขาว
+  int  left_raw;     // ค่า analogRead ดิบ (ใช้ debug)
+  int  right_raw;
 };
-
 
 namespace Sensors {
 
-  // เริ่มต้น I2C + ToF + pin เส้น (เรียกใน setup() ครั้งเดียว)
-  void begin();
+  // เรียกใน setup() หลัง Wire.begin() — ปลุกเซ็นเซอร์ VL53L0X ทีละตัว
+  // และกำหนด I2C address ใหม่ไม่ซ้ำกัน
+  void initToF();
 
-  // อ่านระยะจาก ToF ทั้ง 5 ตัว
-  Dist readDist();
+  // อ่านระยะทางจากเซ็นเซอร์ทั้ง 5 ตัว (เรียกทุก loop)
+  ToFReadings readToF();
 
-  // อ่าน sensor เส้นทั้งสองข้าง
-  Line readLine();
+  // อ่านเซ็นเซอร์ตรวจเส้น และเปรียบเทียบกับ threshold ใน Config.h
+  LineReadings readLine();
+
 }

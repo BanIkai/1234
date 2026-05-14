@@ -1,192 +1,333 @@
 #include "Strategy.h"
-#include "Motors.h"
 #include "Config.h"
+#include "Motors.h"
 
-// ============================================================
-//  Strategy.cpp — กลยุทธ์หลักของหุ่นยนต์ซูโม่
+// =============================================================================
+//  Strategy.cpp — ตรรกะการต่อสู้ของหุ่นยนต์ซูโม่
 //
-//  State Machine มี 4 สถานะ:
-//
-//    ESCAPE_BACK  ← เจอเส้น → ถอยหลัง ESCAPE_BACK_MS
-//         ↓
-//    ESCAPE_TURN  ← หมุนกลับเข้าสนาม ESCAPE_TURN_MS
-//         ↓
-//    ATTACK / TRACK / SEARCH  ← AI ปกติ
-//
-//  ภายใน AI ปกติ (ไม่ได้หนีเส้น):
-//    - เจอศัตรูใกล้  → ATTACK (พุ่งเต็มสปีด)
-//    - เจอศัตรูไกล  → TRACK  (เลี้ยวหา)
-//    - ไม่เจอเลย    → SEARCH (หมุนค้นหา สลับทิศตาม timer)
-// ============================================================
+//  ลำดับความสำคัญของ state (สูงสุด → ต่ำสุด):
+//   1. LINE_ESCAPE  — หนีเส้นขาวขอบสนาม (เร่งด่วนที่สุด)
+//   2. ANTI_FLANK   — หมุนสู้ภัยที่โจมตีจากด้านข้าง
+//   3. RAM          — พุ่งชนเมื่อคู่ต่อสู้อยู่ใกล้มาก
+//   4. TRACK        — ไล่ตามและปรับทิศเมื่อเห็นคู่ต่อสู้
+//   5. SEARCH       — หมุนค้นหาเมื่อยังไม่เห็น
+// =============================================================================
 
-
-// ── enum แทน magic number ────────────────────────────────────
-enum EscapeState {
-  IDLE        = 0,   // ไม่ได้หนีเส้น
-  ESCAPE_BACK = 1,   // กำลังถอยหลัง
-  ESCAPE_TURN = 2,   // กำลังหมุนกลับ
-};
-
-enum TargetDir {
-  DIR_NONE  = 0,
-  DIR_LEFT  = -1,
-  DIR_RIGHT =  1,
-};
-
-
-// ── state ภายใน (private ต่อ file นี้) ──────────────────────
 namespace {
 
-  EscapeState escapeState = IDLE;
-  bool        escapeLeft  = false;          // เจอเส้นซ้าย? (ใช้ตอนหมุนกลับ)
-  unsigned long escapeTimer = 0;
+  // ---------------------------------------------------------------------------
+  //  ตัวแปรสถานะ — คงอยู่ข้าม step() ทุก loop
+  // ---------------------------------------------------------------------------
 
-  TargetDir     lastTarget   = DIR_NONE;    // ทิศที่เจอศัตรูครั้งล่าสุด
-  unsigned long targetTimer  = 0;           // millis() ที่ lock ได้
+  // ทิศที่เห็นคู่ต่อสู้ครั้งล่าสุด (-1=ซ้าย, 0=กลาง, +1=ขวา)
+  int8_t lastSeenDirection = 0;
 
-  bool          searchDir    = false;       // false=ซ้าย, true=ขวา
-  unsigned long searchTimer  = 0;           // ใช้สลับทิศค้นหา
+  // -- ลำดับขั้นตอนหนีเส้น --
+  enum LinePhase : uint8_t { LP_NONE, LP_REVERSE, LP_TURN };
+  LinePhase linePhase        = LP_NONE;
+  uint32_t  linePhaseEndTime = 0;
+  int8_t    lineTurnDir      = 0;  // +1=หมุนขวา, -1=หมุนซ้าย, 0=หมุน 180°
 
+  // -- สถานะการป้องกันด้านข้าง (anti-flank) --
+  uint32_t flankEndTime     = 0;
+  int8_t   flankTurnDir     = 0;
+  uint32_t flankLeftSince   = 0;  // เวลาที่เซ็นเซอร์ซ้ายเริ่มเห็น flank
+  uint32_t flankRightSince  = 0;
 
-  // ── helper: เช็คว่า sensor ด้านหน้าเห็นศัตรูไหม ──────────
-  bool frontSeesTarget(const Dist& d) {
-    return (d.fl < TRACK_DIST) ||
-           (d.fc < TRACK_DIST) ||
-           (d.fr < TRACK_DIST);
+  // -- สถานะตรวจจับการติดขัด (stall) ขณะพุ่งชน --
+  bool     isStallPushing   = false;
+  uint16_t stallRefDistance = 0;
+  uint32_t stallRefTime     = 0;
+  uint32_t releaseFarSince  = 0;
+
+  // ---------------------------------------------------------------------------
+  //  ฟังก์ชันช่วย
+  // ---------------------------------------------------------------------------
+
+  uint16_t minOf3(uint16_t a, uint16_t b, uint16_t c) {
+    return min(min(a, b), c);
   }
 
-  // ── helper: ตัดสินใจทิศจาก dist (คืน DIR_LEFT/RIGHT/NONE) ─
-  TargetDir detectTarget(const Dist& d) {
-    // ตรวจหน้ากลางก่อน (priority สูงสุด)
-    if (d.fc < TRACK_DIST) {
-      if      (d.fl <= d.fr) return DIR_LEFT;
-      else                   return DIR_RIGHT;
+  // หมุนทั้งตัว: dir=+1 ตามเข็ม (ขวา), dir=-1 ทวนเข็ม (ซ้าย)
+  void spinInPlace(int8_t dir, uint8_t pwm) {
+    if (dir > 0) Motors::drive(+pwm, -pwm);  // ล้อซ้ายหน้า ล้อขวาถอย
+    else         Motors::drive(-pwm, +pwm);
+  }
+
+  // ---------------------------------------------------------------------------
+  //  1. หนีเส้น (LINE_ESCAPE)
+  //
+  //  เมื่อเซ็นเซอร์ตรวจเส้นเห็นขาว:
+  //    ระยะที่ 1 — ถอยหลัง LINE_REVERSE_MS ms
+  //    ระยะที่ 2 — หมุนหนีจากขอบ LINE_TURN_MS ms (หรือ 180° ถ้าเห็นทั้งสอง)
+  //
+  //  คืน true = กำลังหนีเส้นอยู่ (ฟังก์ชันอื่นต้องหยุดรอ)
+  // ---------------------------------------------------------------------------
+  bool handleLineEscape(const LineReadings& line) {
+    uint32_t now = millis();
+
+    // ---- กำลังอยู่ในลำดับหนีเส้น ----
+    if (linePhase == LP_REVERSE) {
+      Motors::drive(-RAM_PWM, -RAM_PWM);
+      if ((int32_t)(linePhaseEndTime - now) <= 0) {
+        // ถอยเสร็จ → เปลี่ยนเป็นระยะหมุน
+        linePhase        = LP_TURN;
+        uint16_t turnDuration = (lineTurnDir == 0) ? LINE_180_MS : LINE_TURN_MS;
+        linePhaseEndTime = now + turnDuration;
+      }
+      return true;
     }
-    if (d.fl < TRACK_DIST) return DIR_LEFT;
-    if (d.fr < TRACK_DIST) return DIR_RIGHT;
 
-    // ตรวจ sensor ข้าง
-    if (d.sl < SIDE_DIST)  return DIR_LEFT;
-    if (d.sr < SIDE_DIST)  return DIR_RIGHT;
-
-    return DIR_NONE;
-  }
-
-  // ── helper: ระยะที่ใกล้ที่สุดในฝั่งที่ lock ──────────────
-  int closestFront(const Dist& d) {
-    return min(min(d.fl, d.fc), d.fr);
-  }
-
-
-  // ── พฤติกรรมหลัก 3 แบบ ───────────────────────────────────
-
-  void doAttack() {
-    Motors::move(ATTACK_SPEED, ATTACK_SPEED);
-  }
-
-  void doTrack(TargetDir dir) {
-    // หมุนหาศัตรู: ด้านที่เจอวิ่งเร็ว ด้านตรงข้ามช้า
-    if (dir == DIR_LEFT)
-      Motors::move(TRACK_SLOW, TRACK_FAST);
-    else
-      Motors::move(TRACK_FAST, TRACK_SLOW);
-  }
-
-  void doSearch() {
-    // สลับทิศค้นหาทุก SEARCH_SWAP_MS
-    if (millis() - searchTimer >= SEARCH_SWAP_MS) {
-      searchDir   = !searchDir;
-      searchTimer = millis();
+    if (linePhase == LP_TURN) {
+      spinInPlace(lineTurnDir, TURN_PWM);
+      if ((int32_t)(linePhaseEndTime - now) <= 0) {
+        linePhase = LP_NONE;  // หมุนเสร็จ — กลับโหมดปกติ
+      }
+      return true;
     }
 
-    if (searchDir)
-      Motors::move(-SEARCH_SPEED, SEARCH_SPEED);   // หมุนขวา
-    else
-      Motors::move(SEARCH_SPEED, -SEARCH_SPEED);   // หมุนซ้าย
+    // ---- ตรวจว่ามีเส้นใหม่หรือไม่ ----
+
+    // เส้นทั้งสองข้าง → ถอยและหมุน 180°
+    if (line.left_white && line.right_white) {
+      linePhase        = LP_REVERSE;
+      linePhaseEndTime = now + LINE_REVERSE_MS;
+      lineTurnDir      = 0;  // sentinel: หมุน 180°
+      isStallPushing   = false;
+      flankEndTime     = 0;
+      Motors::drive(-RAM_PWM, -RAM_PWM);
+      return true;
+    }
+
+    // เส้นซ้าย → หมุนขวาหนี
+    if (line.left_white) {
+      linePhase        = LP_REVERSE;
+      linePhaseEndTime = now + LINE_REVERSE_MS;
+      lineTurnDir      = +1;  // หมุนขวา = หนีจากขอบซ้าย
+      isStallPushing   = false;
+      flankEndTime     = 0;
+      Motors::drive(-RAM_PWM, -RAM_PWM);
+      return true;
+    }
+
+    // เส้นขวา → หมุนซ้ายหนี
+    if (line.right_white) {
+      linePhase        = LP_REVERSE;
+      linePhaseEndTime = now + LINE_REVERSE_MS;
+      lineTurnDir      = -1;  // หมุนซ้าย = หนีจากขอบขวา
+      isStallPushing   = false;
+      flankEndTime     = 0;
+      Motors::drive(-RAM_PWM, -RAM_PWM);
+      return true;
+    }
+
+    return false;  // ไม่มีเส้น
   }
 
-} // namespace (anonymous)
+  // ---------------------------------------------------------------------------
+  //  ตรวจว่าสัญญาณด้านข้างเป็นภัยจริง หรือแค่แบนเนอร์หลอก
+  //
+  //  เชื่อว่า "จริง" ก็ต่อเมื่อ:
+  //   - ด้านข้างใกล้กว่า FLANK_CLOSE_MM
+  //   - ด้านข้างใกล้กว่าเซ็นเซอร์หน้าทุกตัว อีก FLANK_LEAD_MM
+  //     (ถ้าตัวจริงอยู่ข้างหน้า หน้าจะเห็นใกล้ ≈ เท่ากัน → ไม่ผ่าน)
+  // ---------------------------------------------------------------------------
+  bool isRealFlankThreat(uint16_t side_dist, const ToFReadings& tof) {
+    if (side_dist >= FLANK_CLOSE_MM) return false;
+    uint16_t front_min = minOf3(tof.fl, tof.fc, tof.fr);
+    return (uint32_t)side_dist + FLANK_LEAD_MM < (uint32_t)front_min;
+  }
 
+  // ---------------------------------------------------------------------------
+  //  2. รับมือภัยด้านข้าง (ANTI_FLANK)
+  //
+  //  เมื่อเห็น flank จริงต่อเนื่องนาน FLANK_PERSIST_MS:
+  //    → หมุนเข้าหาคู่ต่อสู้ ANTI_FLANK_MS ms (หรือจนกว่า FC จะเห็น)
+  //
+  //  คืน true = กำลังหมุนสู้ flank อยู่
+  // ---------------------------------------------------------------------------
+  bool handleAntiFlank(const ToFReadings& tof) {
+    uint32_t now = millis();
 
-// ── public API ───────────────────────────────────────────────
+    // ---- กำลังหมุนอยู่ในช่วง anti-flank ----
+    if (flankEndTime != 0 && (int32_t)(flankEndTime - now) > 0) {
+      if (tof.fc < ENGAGE_DISTANCE) {
+        // FC เห็นคู่ต่อสู้แล้ว — ออกจาก anti-flank ทันที
+        flankEndTime = 0;
+        return false;
+      }
+      spinInPlace(flankTurnDir, TURN_PWM);
+      return true;
+    }
+    flankEndTime = 0;
 
-void AI::reset() {
-  escapeState = IDLE;
-  escapeLeft  = false;
-  escapeTimer = 0;
-  lastTarget  = DIR_NONE;
-  targetTimer = 0;
-  searchDir   = false;
-  searchTimer = 0;
+    // ---- อัปเดตเวลาที่เห็น flank แต่ละข้าง (สำหรับ persistence check) ----
+    bool leftIsRealFlank  = isRealFlankThreat(tof.sl, tof);
+    bool rightIsRealFlank = isRealFlankThreat(tof.sr, tof);
+
+    if (leftIsRealFlank)  { if (flankLeftSince  == 0) flankLeftSince  = now; }
+    else                  { flankLeftSince  = 0; }
+
+    if (rightIsRealFlank) { if (flankRightSince == 0) flankRightSince = now; }
+    else                  { flankRightSince = 0; }
+
+    // ---- ตรวจว่า flank ใดถือนานพอ ----
+    bool leftTriggered  = flankLeftSince  != 0 && (now - flankLeftSince)  >= FLANK_PERSIST_MS;
+    bool rightTriggered = flankRightSince != 0 && (now - flankRightSince) >= FLANK_PERSIST_MS;
+
+    // ถ้าทั้งสองข้าง trigger พร้อมกัน → หมุนหาข้างที่ใกล้กว่า
+    if (leftTriggered && (!rightTriggered || tof.sl <= tof.sr)) {
+      flankTurnDir    = -1;  // หมุนซ้ายเข้าหา
+      flankEndTime    = now + ANTI_FLANK_MS;
+      isStallPushing  = false;
+      flankLeftSince  = 0;
+      spinInPlace(flankTurnDir, TURN_PWM);
+      return true;
+    }
+    if (rightTriggered) {
+      flankTurnDir    = +1;  // หมุนขวาเข้าหา
+      flankEndTime    = now + ANTI_FLANK_MS;
+      isStallPushing  = false;
+      flankRightSince = 0;
+      spinInPlace(flankTurnDir, TURN_PWM);
+      return true;
+    }
+
+    return false;  // ไม่มี flank
+  }
+
+  // ---------------------------------------------------------------------------
+  //  ตรวจจับการติดขัด (stall latch) ขณะกดคู่ต่อสู้
+  //
+  //  ถ้า FC ใกล้มากแต่ระยะไม่ลดลงใน STALL_WINDOW_MS → latch = pushing
+  //  ออกจาก latch เมื่อ FC ไกลขึ้นอย่างต่อเนื่อง
+  //
+  //  คืน true = กำลัง stall-push อยู่ (ให้ใช้ RAM_PWM ต่อไป)
+  // ---------------------------------------------------------------------------
+  bool updateStallLatch(uint16_t front_center_dist) {
+    uint32_t now = millis();
+
+    if (!isStallPushing) {
+      // รอดู: ถ้า FC ใกล้มาก แต่ระยะไม่ลดเลย ถือว่าติดขัด
+      if (front_center_dist < STALL_NEAR_MM) {
+        if (stallRefTime == 0) {
+          stallRefDistance = front_center_dist;
+          stallRefTime     = now;
+        } else if ((int32_t)(now - stallRefTime) >= STALL_WINDOW_MS) {
+          int distChange = (int)stallRefDistance - (int)front_center_dist;
+          bool notMoving = abs(distChange) < (int)STALL_DELTA_MM;
+          if (notMoving) {
+            isStallPushing  = true;
+            releaseFarSince = 0;
+          }
+          // เริ่ม window ใหม่
+          stallRefDistance = front_center_dist;
+          stallRefTime     = now;
+        }
+      } else {
+        stallRefTime = 0;  // ไม่ใกล้พอ — reset
+      }
+      return false;
+    }
+
+    // isStallPushing == true: รอให้ FC ไกลออกอย่างต่อเนื่องก่อนปลด latch
+    if (front_center_dist > STALL_RELEASE_MM) {
+      if (releaseFarSince == 0) releaseFarSince = now;
+      else if ((int32_t)(now - releaseFarSince) >= STALL_RELEASE_MS) {
+        isStallPushing  = false;
+        stallRefTime    = 0;
+        releaseFarSince = 0;
+      }
+    } else {
+      releaseFarSince = 0;  // กลับใกล้แล้ว — รอต่อ
+    }
+
+    return isStallPushing;
+  }
+
+}  // namespace (private)
+
+// =============================================================================
+//  Public API
+// =============================================================================
+
+void Strategy::reset() {
+  lastSeenDirection = 0;
+  linePhase         = LP_NONE;
+  linePhaseEndTime  = 0;
+  lineTurnDir       = 0;
+  flankEndTime      = 0;
+  flankTurnDir      = 0;
+  flankLeftSince    = 0;
+  flankRightSince   = 0;
+  isStallPushing    = false;
+  stallRefDistance  = 0;
+  stallRefTime      = 0;
+  releaseFarSince   = 0;
 }
 
+SumoState Strategy::step(const ToFReadings& tof, const LineReadings& line) {
 
-void AI::run(Dist dist, Line line) {
+  // ======== 1. หนีเส้นขอบ (ความสำคัญสูงสุด) ========
+  if (handleLineEscape(line)) return STATE_LINE_ESCAPE;
 
-  // ===========================================================
-  //  STEP 1 — ตรวจเส้น (ความสำคัญสูงสุด)
-  //           ถ้าเจอเส้นตอนไหนก็ได้ → เริ่ม escape ทันที
-  // ===========================================================
-  if (line.left || line.right) {
-    escapeState = ESCAPE_BACK;
-    escapeLeft  = line.left;     // จำว่าเจอซ้ายหรือขวา
-    escapeTimer = millis();
+  // ======== 2. รับมือภัยด้านข้าง ========
+  if (handleAntiFlank(tof)) return STATE_ANTI_FLANK;
+
+  // ======== 3. พุ่งชน — เมื่อ FC เห็นใกล้มาก หรือกำลัง stall-push ========
+  bool isStalling = updateStallLatch(tof.fc);
+  if (isStalling || tof.fc < RAM_DISTANCE) {
+    Motors::drive(+RAM_PWM, +RAM_PWM);
+    lastSeenDirection = 0;
+    return STATE_RAM;
   }
 
-  // ===========================================================
-  //  STEP 2 — ถอยหลังหนีเส้น
-  // ===========================================================
-  if (escapeState == ESCAPE_BACK) {
-    Motors::move(-ESCAPE_BACK, -ESCAPE_BACK);
+  // ======== 4. ไล่ตาม — เมื่อ FC เห็นคู่ต่อสู้ในระยะ ========
+  if (tof.fc < ENGAGE_DISTANCE) {
+    // FC เห็นชัด → ขับตรง แต่ nudge เล็กน้อยถ้า FL/FR ใกล้กว่า FC มาก
+    bool leftLeading  = (uint32_t)tof.fl + FC_BIAS_MM < (uint32_t)tof.fc;
+    bool rightLeading = (uint32_t)tof.fr + FC_BIAS_MM < (uint32_t)tof.fc;
 
-    if (millis() - escapeTimer >= ESCAPE_BACK_MS) {
-      escapeState = ESCAPE_TURN;
-      escapeTimer = millis();
+    if (leftLeading && !rightLeading) {
+      // คู่ต่อสู้เอียงซ้ายเล็กน้อย → เลี้ยวซ้ายนิด (ซ้ายช้า, ขวาเร็ว)
+      Motors::drive(+CURVE_SLOW_PWM, +CURVE_FAST_PWM);
+      lastSeenDirection = -1;
+    } else if (rightLeading && !leftLeading) {
+      // คู่ต่อสู้เอียงขวาเล็กน้อย → เลี้ยวขวานิด (ซ้ายเร็ว, ขวาช้า)
+      Motors::drive(+CURVE_FAST_PWM, +CURVE_SLOW_PWM);
+      lastSeenDirection = +1;
+    } else {
+      // FC ตรงกลาง → ขับตรงเต็มสปีด
+      Motors::drive(+FORWARD_PWM, +FORWARD_PWM);
+      lastSeenDirection = 0;
     }
-    return;   // ไม่ทำอย่างอื่นระหว่างถอย
+    return STATE_TRACK;
   }
 
-  // ===========================================================
-  //  STEP 3 — หมุนกลับเข้าสนาม
-  //           เจอเส้นซ้าย → หมุนขวา (และกลับกัน)
-  // ===========================================================
-  if (escapeState == ESCAPE_TURN) {
-    if (escapeLeft)
-      Motors::move( ESCAPE_TURN, -ESCAPE_TURN);   // หมุนขวา
-    else
-      Motors::move(-ESCAPE_TURN,  ESCAPE_TURN);   // หมุนซ้าย
-
-    if (millis() - escapeTimer >= ESCAPE_TURN_MS) {
-      escapeState = IDLE;
+  // FC ไม่เห็น แต่ FL หรือ FR เห็น → คู่ต่อสู้เยื้องออกไป เลี้ยวหา
+  if (tof.fl < ENGAGE_DISTANCE || tof.fr < ENGAGE_DISTANCE) {
+    if (tof.fl <= tof.fr) {
+      // ซ้ายใกล้กว่า → เลี้ยวซ้าย
+      Motors::drive(+CURVE_SLOW_PWM, +CURVE_FAST_PWM);
+      lastSeenDirection = -1;
+    } else {
+      // ขวาใกล้กว่า → เลี้ยวขวา
+      Motors::drive(+CURVE_FAST_PWM, +CURVE_SLOW_PWM);
+      lastSeenDirection = +1;
     }
-    return;   // ไม่ทำอย่างอื่นระหว่างหมุน
+    return STATE_TRACK;
   }
 
-  // ===========================================================
-  //  STEP 4 — AI ปกติ (ไม่ได้หนีเส้น)
-  // ===========================================================
-
-  TargetDir detected = detectTarget(dist);
-
-  if (detected != DIR_NONE) {
-    // เจอศัตรู → อัปเดต lock
-    lastTarget  = detected;
-    targetTimer = millis();
+  // ======== 5. อัปเดตทิศจากเซ็นเซอร์ด้านข้าง (ใช้ช่วย SEARCH เท่านั้น) ========
+  // ไม่สั่งมอเตอร์ที่นี่ — แค่จำว่าเห็นจากทิศไหน
+  if (tof.sl < ENGAGE_DISTANCE && tof.sl <= tof.sr) {
+    lastSeenDirection = -1;
+  } else if (tof.sr < ENGAGE_DISTANCE) {
+    lastSeenDirection = +1;
   }
 
-  bool targetLocked = (lastTarget != DIR_NONE) &&
-                      (millis() - targetTimer < LOCK_TIME);
-
-  if (!targetLocked) {
-    // ──── SEARCH: ไม่มีข้อมูลศัตรูเลย ────
-    doSearch();
-    return;
-  }
-
-  // ──── มีเป้าหมาย: โจมตีหรือติดตาม ────
-  if (closestFront(dist) < RAM_DIST) {
-    doAttack();           // ใกล้พอ → พุ่ง!
-  } else {
-    doTrack(lastTarget);  // ไกลอยู่ → เลี้ยวหา
-  }
+  // ======== 6. ค้นหา — หมุนไปทางที่เคยเห็นล่าสุด ========
+  int8_t searchDir = (lastSeenDirection > 0) ? +1 : -1;
+  spinInPlace(searchDir, SEARCH_PWM);
+  return STATE_SEARCH;
 }

@@ -3,91 +3,129 @@
 #include <Wire.h>
 #include <VL53L0X.h>
 
-// ============================================================
-//  Sensors.cpp — จัดการ ToF × 5 + sensor เส้น × 2
-//
-//  ขั้นตอน init ToF:
-//    1. ดึง XSHUT ลง LOW ทุกตัว (ปิดหมด)
-//    2. เปิดทีละตัว → init → ตั้ง address เฉพาะ
-//  วิธีนี้ป้องกัน address ชนกันบน I2C bus เดียว
-// ============================================================
+// =============================================================================
+//  Sensors.cpp — การอ่านเซ็นเซอร์ VL53L0X (วัดระยะ) และตรวจเส้น
+// =============================================================================
 
 namespace {
 
-  // ── instance ToF แต่ละตัว ────────────────────────────────
-  VL53L0X tofSL, tofFL, tofFC, tofFR, tofSR;
+  // อ็อบเจกต์เซ็นเซอร์วัดระยะ ทั้ง 5 ตัว
+  VL53L0X sensor_SL, sensor_FL, sensor_FC, sensor_FR, sensor_SR;
 
-  // ── เปิด ToF 1 ตัว แล้วตั้ง address ────────────────────
-  void initOneSensor(VL53L0X& sensor, int xshutPin, int i2cAddress) {
-    digitalWrite(xshutPin, HIGH);   // ปลุก sensor ขึ้นมา
-    delay(10);                      // รอ boot
-
-    sensor.setTimeout(TOF_TIMEOUT);
-
-    if (!sensor.init()) {
-      while (true);   // หยุดถาวรถ้า init ไม่ผ่าน (debug ง่าย)
+  // -------------------------------------------------------------------------
+  // กระพริบ LED แสดงรหัสเซ็นเซอร์ที่ค้าง (เรียกเมื่อ init ล้มเหลว)
+  // รูปแบบ: กระพริบ id ครั้ง → หยุด 1.2 วินาที → ซ้ำ
+  //   id=1 = SL, 2 = FL, 3 = FC, 4 = FR, 5 = SR
+  // -------------------------------------------------------------------------
+  void blinkErrorForever(uint8_t sensor_id) {
+    pinMode(LED_BUILTIN, OUTPUT);
+    while (true) {
+      for (uint8_t i = 0; i < sensor_id; i++) {
+        digitalWrite(LED_BUILTIN, HIGH); delay(150);
+        digitalWrite(LED_BUILTIN, LOW);  delay(200);
+      }
+      delay(1200);  // หยุดระหว่างรอบ ให้อ่านรหัสทัน
     }
-
-    sensor.setAddress(i2cAddress);
-    sensor.startContinuous();
   }
 
-} // namespace (anonymous)
+  // -------------------------------------------------------------------------
+  // ปลุกเซ็นเซอร์หนึ่งตัวแล้วตั้ง I2C address ใหม่
+  // ต้องทำทีละตัว เพราะทุกตัวเริ่มต้นที่ address เดียวกัน (0x29)
+  // -------------------------------------------------------------------------
+  void bringUpSensor(VL53L0X& sensor, uint8_t xshut_pin, uint8_t new_i2c_addr,
+                     uint8_t sensor_id, const __FlashStringHelper* sensor_name) {
 
+#if VL53L0X_DEBUG
+    Serial.print(F("[ToF] ปลุก ")); Serial.println(sensor_name);
+#endif
 
-// ── public API ───────────────────────────────────────────────
+    // ปล่อยขา XSHUT → เซ็นเซอร์ตื่นผ่าน internal pull-up
+    pinMode(xshut_pin, INPUT);
+    delay(10);
 
-void Sensors::begin() {
-  Wire.begin();
+    sensor.setTimeout(50);
+    if (!sensor.init()) {
+      // init ล้มเหลว — กระพริบ LED แล้วหยุดตลอดกาล
+#if VL53L0X_DEBUG
+      Serial.print(F("[ToF] ERROR ค้างที่ ")); Serial.println(sensor_name);
+      Serial.flush();
+#endif
+      blinkErrorForever(sensor_id);
+    }
 
-  // ตั้ง pin XSHUT เป็น OUTPUT
-  int xshutPins[] = {
-    PIN_XSHUT_SL, PIN_XSHUT_FL, PIN_XSHUT_FC,
-    PIN_XSHUT_FR, PIN_XSHUT_SR
+    // เปลี่ยน I2C address ก่อนปลุกตัวถัดไป
+    sensor.setAddress(new_i2c_addr);
+
+    // ตั้ง timing budget และเริ่มวัดต่อเนื่อง (continuous mode)
+    sensor.setMeasurementTimingBudget(TOF_TIMING_BUDGET_US);
+    sensor.startContinuous(0);  // 0 = วัดถี่สุดเท่าที่ทำได้
+
+#if VL53L0X_DEBUG
+    Serial.print(F("[ToF] OK ")); Serial.println(sensor_name);
+#endif
+  }
+
+  // -------------------------------------------------------------------------
+  // อ่านระยะจากเซ็นเซอร์หนึ่งตัว
+  // ถ้า timeout หรือค่าผิดปกติ → คืน TOF_NO_TARGET
+  // -------------------------------------------------------------------------
+  uint16_t readDistance(VL53L0X& sensor) {
+    uint16_t distance_mm = sensor.readRangeContinuousMillimeters();
+
+    bool is_invalid = sensor.timeoutOccurred()
+                   || distance_mm == 65535          // ค่า error ของ library
+                   || distance_mm > TOF_NO_TARGET;
+
+    return is_invalid ? TOF_NO_TARGET : distance_mm;
+  }
+
+}  // namespace (private)
+
+// =============================================================================
+
+void Sensors::initToF() {
+#if VL53L0X_DEBUG
+  if (!Serial) Serial.begin(115200);
+  Serial.println(F("[ToF] เริ่ม initToF()"));
+#endif
+
+  // กด XSHUT ทุกตัวลง LOW → reset พร้อมกันก่อน
+  uint8_t xshut_pins[] = {
+    PIN_XSHUT_SL, PIN_XSHUT_FL, PIN_XSHUT_FC, PIN_XSHUT_FR, PIN_XSHUT_SR
   };
-  for (int pin : xshutPins) {
+  for (uint8_t pin : xshut_pins) {
     pinMode(pin, OUTPUT);
-    digitalWrite(pin, LOW);   // ปิดทุกตัวก่อน
+    digitalWrite(pin, LOW);
   }
   delay(10);
 
-  // เปิด ToF ทีละตัว พร้อมกำหนด address
-  initOneSensor(tofSL, PIN_XSHUT_SL, ADDR_SL);
-  initOneSensor(tofFL, PIN_XSHUT_FL, ADDR_FL);
-  initOneSensor(tofFC, PIN_XSHUT_FC, ADDR_FC);
-  initOneSensor(tofFR, PIN_XSHUT_FR, ADDR_FR);
-  initOneSensor(tofSR, PIN_XSHUT_SR, ADDR_SR);
+  // ปลุกทีละตัว → ตั้ง address → ปลุกตัวถัดไป
+  bringUpSensor(sensor_SL, PIN_XSHUT_SL, TOF_ADDR_SL, 1, F("SL"));
+  bringUpSensor(sensor_FL, PIN_XSHUT_FL, TOF_ADDR_FL, 2, F("FL"));
+  bringUpSensor(sensor_FC, PIN_XSHUT_FC, TOF_ADDR_FC, 3, F("FC"));
+  bringUpSensor(sensor_FR, PIN_XSHUT_FR, TOF_ADDR_FR, 4, F("FR"));
+  bringUpSensor(sensor_SR, PIN_XSHUT_SR, TOF_ADDR_SR, 5, F("SR"));
 
-  // pin sensor เส้น
-  pinMode(PIN_LINE_L, INPUT);
-  pinMode(PIN_LINE_R, INPUT);
+#if VL53L0X_DEBUG
+  Serial.println(F("[ToF] พร้อมทุกตัว"));
+#endif
 }
 
-
-Dist Sensors::readDist() {
-  Dist d;
-  d.sl = tofSL.readRangeContinuousMillimeters();
-  d.fl = tofFL.readRangeContinuousMillimeters();
-  d.fc = tofFC.readRangeContinuousMillimeters();
-  d.fr = tofFR.readRangeContinuousMillimeters();
-  d.sr = tofSR.readRangeContinuousMillimeters();
-
-  // ถ้า timeout ให้ใส่ NO_TARGET แทนค่าผิดพลาด
-  if (tofSL.timeoutOccurred()) d.sl = NO_TARGET;
-  if (tofFL.timeoutOccurred()) d.fl = NO_TARGET;
-  if (tofFC.timeoutOccurred()) d.fc = NO_TARGET;
-  if (tofFR.timeoutOccurred()) d.fr = NO_TARGET;
-  if (tofSR.timeoutOccurred()) d.sr = NO_TARGET;
-
-  return d;
+ToFReadings Sensors::readToF() {
+  ToFReadings readings;
+  readings.sl = readDistance(sensor_SL);
+  readings.fl = readDistance(sensor_FL);
+  readings.fc = readDistance(sensor_FC);
+  readings.fr = readDistance(sensor_FR);
+  readings.sr = readDistance(sensor_SR);
+  return readings;
 }
 
-
-Line Sensors::readLine() {
-  Line l;
-  l.leftRaw  = analogRead(PIN_LINE_L);
-  l.rightRaw = analogRead(PIN_LINE_R);
-  l.left     = l.leftRaw  > LINE_L_TH;   // เกิน threshold = เจอเส้น
-  l.right    = l.rightRaw > LINE_R_TH;
-  return l;
+LineReadings Sensors::readLine() {
+  LineReadings readings;
+  readings.left_raw    = analogRead(PIN_LINE_L);
+  readings.right_raw   = analogRead(PIN_LINE_R);
+  readings.left_white  = readings.left_raw  > LINE_L_THRESHOLD;
+  readings.right_white = readings.right_raw > LINE_R_THRESHOLD;
+  return readings;
 }
