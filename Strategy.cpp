@@ -15,8 +15,8 @@
 //
 //  ภายใน AI ปกติ (ไม่ได้หนีเส้น):
 //    - เจอศัตรูใกล้  → ATTACK (พุ่งเต็มสปีด)
-//    - เจอศัตรูไกล  → TRACK  (เลี้ยวหา)
-//    - ไม่เจอเลย    → SEARCH (หมุนค้นหา สลับทิศตาม timer)
+//    - เจอศัตรูไกล  → TRACK  (proportional: เลี้ยวตาม diff ของ fl/fr)
+//    - ไม่เจอเลย    → SEARCH (spiral: เดินหน้า → หมุน → สลับทิศ)
 // ============================================================
 
 
@@ -84,25 +84,78 @@ namespace {
     Motors::move(ATTACK_SPEED, ATTACK_SPEED);
   }
 
-  void doTrack(TargetDir dir) {
-    // หมุนหาศัตรู: ด้านที่เจอวิ่งเร็ว ด้านตรงข้ามช้า
-    if (dir == DIR_LEFT)
-      Motors::move(TRACK_SLOW, TRACK_FAST);
-    else
-      Motors::move(TRACK_FAST, TRACK_SLOW);
+  // ── TRACK แบบ proportional ───────────────────────────────
+  //  แทนที่จะใช้ความเร็วตายตัว TRACK_FAST/TRACK_SLOW
+  //  คำนวณจากความต่างของ fl กับ fr
+  //
+  //  ตัวอย่าง:
+  //    fl=100, fr=300 → diff=200 → เลี้ยวซ้ายมาก
+  //    fl=200, fr=220 → diff=20  → ศัตรูเกือบตรงหน้า → วิ่งตรง
+  //
+  void doTrack(TargetDir dir, const Dist& d) {
+    // ถ้า fc เห็นศัตรู ใช้ fl กับ fr เทียบกัน
+    // ถ้า fc ไม่เห็น (sensor ข้าง) ใช้ความเร็วตายตัวเหมือนเดิม
+    if (d.fc < TRACK_DIST) {
+      int diff = d.fl - d.fr;   // บวก = ศัตรูอยู่ขวา, ลบ = ซ้าย
+
+      if (abs(diff) < TRACK_CENTER_ZONE) {
+        // ศัตรูอยู่ตรงหน้าพอ → วิ่งตรงเลย
+        Motors::move(TRACK_FAST, TRACK_FAST);
+        return;
+      }
+
+      // scale diff ให้เป็นปริมาณเลี้ยว (0–90)
+      // diff สูงสุดประมาณ TRACK_DIST = 350 → normalize
+      int turn = map(abs(diff), TRACK_CENTER_ZONE, TRACK_DIST, 20, 90);
+      turn = constrain(turn, 20, 90);
+
+      int fast = TRACK_FAST;
+      int slow = TRACK_FAST - turn;   // ลดล้อฝั่งตรงข้ามตาม diff
+
+      if (diff > 0)   // ศัตรูอยู่ขวา → ล้อขวาช้า
+        Motors::move(fast, slow);
+      else            // ศัตรูอยู่ซ้าย → ล้อซ้ายช้า
+        Motors::move(slow, fast);
+
+    } else {
+      // sensor ข้างเจอ → เลี้ยวตายตัวเหมือนเดิม
+      if (dir == DIR_LEFT)
+        Motors::move(TRACK_SLOW, TRACK_FAST);
+      else
+        Motors::move(TRACK_FAST, TRACK_SLOW);
+    }
   }
 
+
+  // ── SEARCH แบบ spiral ────────────────────────────────────
+  //  เดิม: หมุนอยู่กับที่ สลับซ้าย-ขวา
+  //  ใหม่: เดินหน้าสั้นๆ (SEARCH_FWD_MS) แล้วค่อยหมุน
+  //         ทำให้ครอบคลุมพื้นที่สนามได้มากขึ้น
+  //
+  //  pattern:
+  //    [เดินหน้า 200ms] → [หมุน 600ms] → [เดินหน้า 200ms] → ...
+  //
   void doSearch() {
-    // สลับทิศค้นหาทุก SEARCH_SWAP_MS
-    if (millis() - searchTimer >= SEARCH_SWAP_MS) {
+    unsigned long elapsed = millis() - searchTimer;
+    unsigned long cycle   = SEARCH_FWD_MS + SEARCH_SWAP_MS;  // 800ms ต่อรอบ
+
+    if (elapsed >= cycle) {
+      // ครบ 1 รอบ → สลับทิศแล้วเริ่มใหม่
       searchDir   = !searchDir;
       searchTimer = millis();
+      elapsed     = 0;
     }
 
-    if (searchDir)
-      Motors::move(-SEARCH_SPEED, SEARCH_SPEED);   // หมุนขวา
-    else
-      Motors::move(SEARCH_SPEED, -SEARCH_SPEED);   // หมุนซ้าย
+    if (elapsed < SEARCH_FWD_MS) {
+      // ช่วงแรกของรอบ: เดินหน้า
+      Motors::move(SEARCH_SPEED, SEARCH_SPEED);
+    } else {
+      // ช่วงหลัง: หมุนค้นหา
+      if (searchDir)
+        Motors::move(-SEARCH_SPEED, SEARCH_SPEED);   // หมุนขวา
+      else
+        Motors::move(SEARCH_SPEED, -SEARCH_SPEED);   // หมุนซ้าย
+    }
   }
 
 } // namespace (anonymous)
@@ -188,8 +241,8 @@ void AI::run(Dist dist, Line line) {
 
   // ──── มีเป้าหมาย: โจมตีหรือติดตาม ────
   if (closestFront(dist) < RAM_DIST) {
-    doAttack();           // ใกล้พอ → พุ่ง!
+    doAttack();                    // ใกล้พอ → พุ่ง!
   } else {
-    doTrack(lastTarget);  // ไกลอยู่ → เลี้ยวหา
+    doTrack(lastTarget, dist);     // ไกลอยู่ → เลี้ยวหา (proportional)
   }
 }
