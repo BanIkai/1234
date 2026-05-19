@@ -1,3 +1,4 @@
+#include <Arduino.h>
 #include "Strategy.h"
 #include "Motors.h"
 #include "Config.h"
@@ -22,9 +23,9 @@
 
 // ── enum แทน magic number ────────────────────────────────────
 enum EscapeState {
-  IDLE        = 0,   // ไม่ได้หนีเส้น
-  ESCAPE_BACK = 1,   // กำลังถอยหลัง
-  ESCAPE_TURN = 2,   // กำลังหมุนกลับ
+  ESC_IDLE = 0,   // ไม่ได้หนีเส้น
+  ESC_BACK = 1,   // กำลังถอยหลัง
+  ESC_TURN = 2,   // กำลังหมุนกลับ
 };
 
 enum TargetDir {
@@ -37,7 +38,7 @@ enum TargetDir {
 // ── state ภายใน (private ต่อ file นี้) ──────────────────────
 namespace {
 
-  EscapeState escapeState = IDLE;
+  EscapeState escapeState = ESC_IDLE;
   bool        escapeLeft  = false;          // เจอเส้นซ้าย? (ใช้ตอนหมุนกลับ)
   unsigned long escapeTimer = 0;
 
@@ -110,7 +111,7 @@ namespace {
       turn = constrain(turn, 20, 90);
 
       int fast = TRACK_FAST;
-      int slow = TRACK_FAST - turn;   // ลดล้อฝั่งตรงข้ามตาม diff
+      int slow = constrain(TRACK_FAST - turn, 0, 255);   // ลดล้อฝั่งตรงข้ามตาม diff
 
       if (diff > 0)   // ศัตรูอยู่ขวา → ล้อขวาช้า
         Motors::move(fast, slow);
@@ -164,7 +165,7 @@ namespace {
 // ── public API ───────────────────────────────────────────────
 
 void AI::reset() {
-  escapeState = IDLE;
+  escapeState = ESC_IDLE;
   escapeLeft  = false;
   escapeTimer = 0;
   lastTarget  = DIR_NONE;
@@ -183,8 +184,8 @@ void AI::run(Dist dist, Line line) {
   // แก้: เริ่ม escape ใหม่ได้เฉพาะตอน IDLE เท่านั้น
   // ถ้าไม่ check escapeState == IDLE → escapeTimer จะ reset ซ้ำทุก loop
   // ตราบใดที่ sensor ยังเห็นเส้น → หนีไม่สำเร็จ
-  if ((line.left || line.right) && escapeState == IDLE) {
-    escapeState = ESCAPE_BACK;
+  if ((line.left || line.right) && escapeState == ESC_IDLE) {
+    escapeState = ESC_BACK;
     escapeLeft  = line.left;     // จำว่าเจอซ้ายหรือขวา
     escapeTimer = millis();
   }
@@ -192,11 +193,11 @@ void AI::run(Dist dist, Line line) {
   // ===========================================================
   //  STEP 2 — ถอยหลังหนีเส้น
   // ===========================================================
-  if (escapeState == ESCAPE_BACK) {
+  if (escapeState == ESC_BACK) {
     Motors::move(-ESCAPE_BACK, -ESCAPE_BACK);
 
     if (millis() - escapeTimer >= ESCAPE_BACK_MS) {
-      escapeState = ESCAPE_TURN;
+      escapeState = ESC_TURN;
       escapeTimer = millis();
     }
     return;   // ไม่ทำอย่างอื่นระหว่างถอย
@@ -206,14 +207,14 @@ void AI::run(Dist dist, Line line) {
   //  STEP 3 — หมุนกลับเข้าสนาม
   //           เจอเส้นซ้าย → หมุนขวา (และกลับกัน)
   // ===========================================================
-  if (escapeState == ESCAPE_TURN) {
+  if (escapeState == ESC_TURN) {
     if (escapeLeft)
       Motors::move( ESCAPE_TURN, -ESCAPE_TURN);   // หมุนขวา
     else
       Motors::move(-ESCAPE_TURN,  ESCAPE_TURN);   // หมุนซ้าย
 
     if (millis() - escapeTimer >= ESCAPE_TURN_MS) {
-      escapeState = IDLE;
+      escapeState = ESC_IDLE;
     }
     return;   // ไม่ทำอย่างอื่นระหว่างหมุน
   }

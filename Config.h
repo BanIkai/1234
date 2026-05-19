@@ -17,8 +17,8 @@
 #define PIN_LINE_L  A2   // sensor เส้นซ้าย
 #define PIN_LINE_R  A7   // sensor เส้นขวา
 
-#define LINE_L_TH  920   // ค่า threshold ซ้าย  (> = เจอเส้นขาว)
-#define LINE_R_TH  60   // ค่า threshold ขวา  (> = เจอเส้นขาว)
+#define LINE_L_TH  920   // ค่า threshold ซ้าย  (analogRead > ค่านี้ = เจอเส้นขาว)
+#define LINE_R_TH  500   // ค่า threshold ขวา  (analogRead > ค่านี้ = เจอเส้นขาว) ← ปรับตามค่าจริงที่วัดได้
 
 
 // ── ขา XSHUT ของ ToF แต่ละตัว ───────────────────────────────
