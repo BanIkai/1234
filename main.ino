@@ -1,21 +1,36 @@
-#include "Motors.h"
-#include "Sensors.h"
-#include "Strategy.h"
+#include "Motors.h"    // ไฟล์ควบคุมมอเตอร์
+#include "Sensors.h"   // ไฟล์อ่าน sensor
+#include "Strategy.h"  // ไฟล์ตัดสินใจ AI
 
 // ============================================================
 //  main.ino — จุดเริ่มต้นโปรแกรม
+//
+//  Arduino จะเรียกฟังก์ชัน setup() 1 ครั้งตอนเปิดเครื่อง
+//  แล้ววนเรียก loop() ซ้ำๆ ไปเรื่อยๆ ตลอดเวลา
 // ============================================================
 
-void setup() {
-  Motors::begin();    // เริ่มต้น pin มอเตอร์
-  Sensors::begin();   // เริ่มต้น ToF × 5 + sensor เส้น
-  AI::reset();        // reset สถานะ AI
 
-  delay(5000);        // รอ 5 วิ ตามกติกา WRS ก่อนเริ่มเคลื่อนที่
+void setup() {
+  Motors::begin();   // เตรียมขามอเตอร์ให้พร้อมใช้งาน
+  Sensors::begin();  // เตรียม sensor ระยะและ sensor เส้น
+  AI::reset();       // ล้างค่า state ของ AI ให้เริ่มต้นใหม่
+
+  // รอ 5 วินาทีตามกติกา WRS ก่อนที่หุ่นจะเริ่มเคลื่อนที่
+  // (ให้เวลาวางหุ่นบนสนามแล้วถอยมือออก)
+  delay(5000);
 }
 
+
 void loop() {
-  Dist dist = Sensors::readDist();   // อ่านระยะจาก ToF ทั้ง 5 ตัว
-  Line line = Sensors::readLine();   // อ่าน sensor เส้น
-  AI::run(dist, line);               // ตัดสินใจและสั่งมอเตอร์
+  // 1. อ่านค่าระยะจาก sensor รอบตัว
+  Dist dist = Sensors::readDist();
+
+  // 2. อ่านค่า sensor ตรวจเส้นขาว
+  Line line = Sensors::readLine();
+
+  // 3. ส่งข้อมูลให้ AI ตัดสินใจ และสั่งมอเตอร์
+  AI::run(dist, line);
+
+  // loop() จะวนซ้ำเร็วมาก (หลายร้อยครั้งต่อวินาที)
+  // ทำให้หุ่นตอบสนองต่อ sensor ได้แทบจะทันที
 }
