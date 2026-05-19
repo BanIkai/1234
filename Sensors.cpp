@@ -1,38 +1,49 @@
 #include "Sensors.h"
 #include "Config.h"
-#include <Wire.h>
-#include <VL53L0X.h>
 
 // ============================================================
-//  Sensors.cpp — จัดการ ToF × 5 + sensor เส้น × 2
+//  Sensors.cpp — จัดการ Sharp GP2Y0A41SK0F × 5 + sensor เส้น × 2
 //
-//  ขั้นตอน init ToF:
-//    1. ดึง XSHUT ลง LOW ทุกตัว (ปิดหมด)
-//    2. เปิดทีละตัว → init → ตั้ง address เฉพาะ
-//  วิธีนี้ป้องกัน address ชนกันบน I2C bus เดียว
+//  การแปลงค่า Analog → mm:
+//    Vout ของ GP2Y0A41SK0F สัมพันธ์กับระยะแบบไม่เชิงเส้น
+//    ใช้สูตร:  mm = SHARP_K / analogRead(pin)
+//    (ดัดแปลงจาก datasheet curve และ fitting จริง)
+//
+//    ข้อควรระวัง:
+//      - ระยะ < 40 mm  → sensor ให้ค่าบิดเบน → ตัดทิ้ง (NO_TARGET)
+//      - ระยะ > 300 mm → สัญญาณอ่อนมาก    → ตัดทิ้ง (NO_TARGET)
+//      - ค่า raw = 0   → ป้องกัน divide-by-zero
+//
+//  ไม่ต้องการ:
+//    - Wire / I2C
+//    - XSHUT pin
+//    - Library พิเศษ (ใช้แค่ analogRead() มาตรฐาน)
 // ============================================================
 
 namespace {
 
-  // ── instance ToF แต่ละตัว ────────────────────────────────
-  VL53L0X tofSL, tofFL, tofFC, tofFR, tofSR;
+  // ── แปลง analogRead → mm ────────────────────────────────
+  //   รับ pin, คืน mm หรือ NO_TARGET ถ้านอกช่วง
+  int sharpReadMM(int pin) {
 
-  // ── เปิด ToF 1 ตัว แล้วตั้ง address ────────────────────
-  void initOneSensor(VL53L0X& sensor, int xshutPin, int i2cAddress, const char* name) {
-    digitalWrite(xshutPin, HIGH);   // ปลุก sensor ขึ้นมา
-    delay(10);                      // รอ boot
-
-    sensor.setTimeout(TOF_TIMEOUT);
-
-    if (!sensor.init()) {
-      // แจ้งชื่อ sensor ที่ fail แล้วค้างไว้ (ง่ายต่อการ debug)
-      Serial.print(F("[ERROR] ToF init failed: "));
-      Serial.println(name);
-      while (true);
+    // Oversample: อ่านหลายครั้งแล้วเฉลี่ย ลด noise จาก ADC
+    long sum = 0;
+    for (int i = 0; i < SHARP_SAMPLES; i++) {
+      sum += analogRead(pin);
+      delayMicroseconds(200);   // รอให้ S&H ของ ADC settle ระหว่างรอบ
     }
+    int raw = (int)(sum / SHARP_SAMPLES);
 
-    sensor.setAddress(i2cAddress);
-    sensor.startContinuous();
+    // ป้องกัน divide-by-zero และ raw ต่ำมาก (sensor ถูกบล็อก / ไฟดับ)
+    if (raw <= 0) return NO_TARGET;
+
+    // แปลงเป็น mm ด้วยสูตร inverse
+    int mm = (int)(SHARP_K / (float)(raw + SHARP_OFFSET));
+
+    // กรองค่านอกช่วงที่เชื่อถือได้ของ GP2Y0A41SK0F
+    if (mm < SHARP_MIN_MM || mm > SHARP_MAX_MM) return NO_TARGET;
+
+    return mm;
   }
 
 } // namespace (anonymous)
@@ -41,57 +52,31 @@ namespace {
 // ── public API ───────────────────────────────────────────────
 
 void Sensors::begin() {
-  Serial.begin(115200);   // เปิด Serial สำหรับ debug (ดู error ตอน init)
-  Wire.begin();
+  Serial.begin(115200);   // เปิด Serial สำหรับ debug
 
-  // ตั้ง pin XSHUT เป็น OUTPUT
-  int xshutPins[] = {
-    PIN_XSHUT_SL, PIN_XSHUT_FL, PIN_XSHUT_FC,
-    PIN_XSHUT_FR, PIN_XSHUT_SR
-  };
-  for (int pin : xshutPins) {
-    pinMode(pin, OUTPUT);
-    digitalWrite(pin, LOW);   // ปิดทุกตัวก่อน
-  }
-  delay(10);
-
-  // เปิด ToF ทีละตัว พร้อมกำหนด address
-  initOneSensor(tofSL, PIN_XSHUT_SL, ADDR_SL, "SL");
-  initOneSensor(tofFL, PIN_XSHUT_FL, ADDR_FL, "FL");
-  initOneSensor(tofFC, PIN_XSHUT_FC, ADDR_FC, "FC");
-  initOneSensor(tofFR, PIN_XSHUT_FR, ADDR_FR, "FR");
-  initOneSensor(tofSR, PIN_XSHUT_SR, ADDR_SR, "SR");
+  // Sharp GP2Y เป็น Analog OUTPUT — ตั้งเป็น INPUT เพื่อ analogRead
+  // (Arduino Uno/Nano: A0–A5 เป็น INPUT by default แต่ตั้งชัดเจนไว้ดีกว่า)
+  pinMode(PIN_SHARP_SL, INPUT);
+  pinMode(PIN_SHARP_FL, INPUT);
+  pinMode(PIN_SHARP_FC, INPUT);
+  pinMode(PIN_SHARP_FR, INPUT);
+  pinMode(PIN_SHARP_SR, INPUT);
 
   // pin sensor เส้น
   pinMode(PIN_LINE_L, INPUT);
   pinMode(PIN_LINE_R, INPUT);
+
+  Serial.println(F("[Sensors] Sharp GP2Y0A41SK0F x5 ready (Analog mode)"));
 }
 
 
 Dist Sensors::readDist() {
   Dist d;
-  d.sl = tofSL.readRangeContinuousMillimeters();
-  d.fl = tofFL.readRangeContinuousMillimeters();
-  d.fc = tofFC.readRangeContinuousMillimeters();
-  d.fr = tofFR.readRangeContinuousMillimeters();
-  d.sr = tofSR.readRangeContinuousMillimeters();
-
-  // ถ้า timeout ให้ใส่ NO_TARGET แทนค่าผิดพลาด
-  if (tofSL.timeoutOccurred()) d.sl = NO_TARGET;
-  if (tofFL.timeoutOccurred()) d.fl = NO_TARGET;
-  if (tofFC.timeoutOccurred()) d.fc = NO_TARGET;
-  if (tofFR.timeoutOccurred()) d.fr = NO_TARGET;
-  if (tofSR.timeoutOccurred()) d.sr = NO_TARGET;
-
-  // กรองค่าเกินจริง (VL53L0X คืน 8190 หรือ > 1200mm เมื่อวัดไม่ได้)
-  // สนามซูโม่มาตรฐาน ~770mm เส้นผ่านศูนย์กลาง ตัด > 1200 ทิ้ง
-  const int MAX_VALID = 1200;
-  if (d.sl > MAX_VALID) d.sl = NO_TARGET;
-  if (d.fl > MAX_VALID) d.fl = NO_TARGET;
-  if (d.fc > MAX_VALID) d.fc = NO_TARGET;
-  if (d.fr > MAX_VALID) d.fr = NO_TARGET;
-  if (d.sr > MAX_VALID) d.sr = NO_TARGET;
-
+  d.sl = sharpReadMM(PIN_SHARP_SL);
+  d.fl = sharpReadMM(PIN_SHARP_FL);
+  d.fc = sharpReadMM(PIN_SHARP_FC);
+  d.fr = sharpReadMM(PIN_SHARP_FR);
+  d.sr = sharpReadMM(PIN_SHARP_SR);
   return d;
 }
 

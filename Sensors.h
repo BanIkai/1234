@@ -2,10 +2,13 @@
 
 // ============================================================
 //  Sensors.h — โครงสร้างข้อมูลและ API อ่านค่า Sensor
+//  [แก้ไข] ใช้ Sharp GP2Y0A41SK0F (Analog) แทน VL53L0X (I2C)
+//          Interface ภายนอก (Dist / Line / begin / readDist / readLine)
+//          เหมือนเดิมทุกอย่าง — Strategy.cpp ไม่ต้องแก้
 // ============================================================
 
-// ── ข้อมูลระยะจาก ToF ทั้ง 5 ตัว (หน่วย mm) ────────────────
-//   NO_TARGET (999) = ไม่เจอเป้า หรือ timeout
+// ── ข้อมูลระยะจาก Sharp sensor ทั้ง 5 ตัว (หน่วย mm) ────────
+//   NO_TARGET (999) = ไม่เจอเป้า หรือค่านอกช่วง sensor
 struct Dist {
   int sl;   // Side  Left  — ด้านข้างซ้าย
   int fl;   // Front Left  — หน้าซ้าย
@@ -26,10 +29,11 @@ struct Line {
 
 namespace Sensors {
 
-  // เริ่มต้น I2C + ToF + pin เส้น (เรียกใน setup() ครั้งเดียว)
+  // เริ่มต้น pin Analog + pin เส้น (เรียกใน setup() ครั้งเดียว)
+  // [หมายเหตุ] ไม่ต้องเรียก Wire.begin() อีกต่อไป เพราะไม่ใช้ I2C
   void begin();
 
-  // อ่านระยะจาก ToF ทั้ง 5 ตัว
+  // อ่านระยะจาก Sharp sensor ทั้ง 5 ตัว
   Dist readDist();
 
   // อ่าน sensor เส้นทั้งสองข้าง
