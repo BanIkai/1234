@@ -6,22 +6,19 @@
 // ============================================================
 //  Strategy.cpp — กลยุทธ์หลักของหุ่นยนต์ซูโม่
 //
-//  State Machine มี 4 สถานะ:
+//  State Machine (ลำดับความสำคัญ):
 //
-//    ESCAPE_BACK  ← เจอเส้น → ถอยหลัง ESCAPE_BACK_MS
-//         ↓
-//    ESCAPE_TURN  ← หมุนกลับเข้าสนาม ESCAPE_TURN_MS
-//         ↓
-//    ATTACK / TRACK / SEARCH  ← AI ปกติ
-//
-//  ภายใน AI ปกติ (ไม่ได้หนีเส้น):
-//    - เจอศัตรูใกล้  → ATTACK (พุ่งเต็มสปีด)
-//    - เจอศัตรูไกล  → TRACK  (proportional: เลี้ยวตาม diff ของ fl/fr)
-//    - ไม่เจอเลย    → SEARCH (spiral: เดินหน้า → หมุน → สลับทิศ)
+//    1. ESCAPE_BACK  ← เจอเส้น → ถอยหลัง ESCAPE_BACK_MS
+//    2. ESCAPE_TURN  ← หมุนกลับเข้าสนาม ESCAPE_TURN_MS
+//    3. AI ปกติ:
+//         ATTACK  — เจอศัตรูในระยะพุ่ง (< RAM_DIST)
+//         TRACK   — เจอศัตรูแต่ยังไกล (proportional steering)
+//         SEARCH  — ยังไม่เจอศัตรู (spiral pattern)
 // ============================================================
 
 
-// ── enum แทน magic number ────────────────────────────────────
+// ── ประเภทข้อมูล (Enum) ──────────────────────────────────────
+
 enum EscapeState {
   ESC_IDLE = 0,   // ไม่ได้หนีเส้น
   ESC_BACK = 1,   // กำลังถอยหลัง
@@ -29,97 +26,102 @@ enum EscapeState {
 };
 
 enum TargetDir {
-  DIR_NONE  = 0,
+  DIR_NONE  =  0,
   DIR_LEFT  = -1,
   DIR_RIGHT =  1,
 };
 
 
-// ── state ภายใน (private ต่อ file นี้) ──────────────────────
+// ── State ภายใน (เห็นได้เฉพาะ file นี้) ─────────────────────
 namespace {
 
-  EscapeState escapeState = ESC_IDLE;
-  bool        escapeLeft  = false;          // เจอเส้นซ้าย? (ใช้ตอนหมุนกลับ)
+  // --- Escape state ---
+  EscapeState   escapeState = ESC_IDLE;
+  bool          escapeLeft  = false;    // เจอเส้นซ้าย? (ใช้ตอนหมุนกลับ)
   unsigned long escapeTimer = 0;
 
-  TargetDir     lastTarget   = DIR_NONE;    // ทิศที่เจอศัตรูครั้งล่าสุด
-  unsigned long targetTimer  = 0;           // millis() ที่ lock ได้
+  // --- Target lock ---
+  TargetDir     lastTarget  = DIR_NONE;
+  unsigned long targetTimer = 0;        // millis() ที่เห็นเป้าครั้งล่าสุด
 
-  bool          searchDir    = false;       // false=ซ้าย, true=ขวา
-  unsigned long searchTimer  = 0;           // ใช้สลับทิศค้นหา
+  // --- Search state ---
+  bool          searchDir   = false;    // false=ซ้าย, true=ขวา
+  unsigned long searchTimer = 0;
 
 
-  // ── helper: เช็คว่า sensor ด้านหน้าเห็นศัตรูไหม ──────────
+  // ================================================================
+  //  Helper Functions
+  // ================================================================
+
+  // คืน true ถ้า sensor ด้านหน้าใดด้านหนึ่งเห็นศัตรูในระยะ TRACK_DIST
   bool frontSeesTarget(const Dist& d) {
     return (d.fl < TRACK_DIST) ||
            (d.fc < TRACK_DIST) ||
            (d.fr < TRACK_DIST);
   }
 
-  // ── helper: ตัดสินใจทิศจาก dist (คืน DIR_LEFT/RIGHT/NONE) ─
+  // วิเคราะห์ข้อมูล sensor แล้วคืนทิศของศัตรู (หรือ DIR_NONE)
+  // ลำดับความสำคัญ: หน้ากลาง → หน้าซ้าย → หน้าขวา → ข้างซ้าย → ข้างขวา
   TargetDir detectTarget(const Dist& d) {
-    // ตรวจหน้ากลางก่อน (priority สูงสุด)
     if (d.fc < TRACK_DIST) {
-      if      (d.fl <= d.fr) return DIR_LEFT;
-      else                   return DIR_RIGHT;
+      return (d.fl <= d.fr) ? DIR_LEFT : DIR_RIGHT;
     }
     if (d.fl < TRACK_DIST) return DIR_LEFT;
     if (d.fr < TRACK_DIST) return DIR_RIGHT;
-
-    // ตรวจ sensor ข้าง
     if (d.sl < SIDE_DIST)  return DIR_LEFT;
     if (d.sr < SIDE_DIST)  return DIR_RIGHT;
-
     return DIR_NONE;
   }
 
-  // ── helper: ระยะที่ใกล้ที่สุดในฝั่งที่ lock ──────────────
+  // คืนระยะที่ใกล้ที่สุดจาก sensor ด้านหน้า 3 ตัว
   int closestFront(const Dist& d) {
     return min(min(d.fl, d.fc), d.fr);
   }
 
 
-  // ── พฤติกรรมหลัก 3 แบบ ───────────────────────────────────
+  // ================================================================
+  //  พฤติกรรมหลัก 3 แบบ
+  // ================================================================
 
+  // ATTACK — พุ่งชนเต็มสปีด
   void doAttack() {
     Motors::move(ATTACK_SPEED, ATTACK_SPEED);
   }
 
-  // ── TRACK แบบ proportional ───────────────────────────────
-  //  แทนที่จะใช้ความเร็วตายตัว TRACK_FAST/TRACK_SLOW
-  //  คำนวณจากความต่างของ fl กับ fr
+  // TRACK — เลี้ยวตามศัตรูแบบ proportional
   //
-  //  ตัวอย่าง:
-  //    fl=100, fr=300 → diff=200 → เลี้ยวซ้ายมาก
-  //    fl=200, fr=220 → diff=20  → ศัตรูเกือบตรงหน้า → วิ่งตรง
+  //   ถ้า sensor หน้ากลาง (fc) เห็นศัตรู:
+  //     คำนวณ diff = fl - fr แล้วปรับความเร็วล้อตามสัดส่วน
+  //     → เลี้ยวนิดถ้าศัตรูเกือบตรงหน้า, เลี้ยวมากถ้าเอียง
+  //
+  //   ถ้า sensor ข้างเจอ (fc ไม่เห็น):
+  //     ใช้ความเร็วตายตัว TRACK_FAST / TRACK_SLOW
   //
   void doTrack(TargetDir dir, const Dist& d) {
-    // ถ้า fc เห็นศัตรู ใช้ fl กับ fr เทียบกัน
-    // ถ้า fc ไม่เห็น (sensor ข้าง) ใช้ความเร็วตายตัวเหมือนเดิม
     if (d.fc < TRACK_DIST) {
+      // Proportional steering จาก fl - fr
       int diff = d.fl - d.fr;   // บวก = ศัตรูอยู่ขวา, ลบ = ซ้าย
 
       if (abs(diff) < TRACK_CENTER_ZONE) {
-        // ศัตรูอยู่ตรงหน้าพอ → วิ่งตรงเลย
+        // ศัตรูตรงหน้าพอ → วิ่งตรง
         Motors::move(TRACK_FAST, TRACK_FAST);
         return;
       }
 
-      // scale diff ให้เป็นปริมาณเลี้ยว (0–90)
-      // diff สูงสุดประมาณ TRACK_DIST = 350 → normalize
+      // แปลง diff เป็นค่าเลี้ยว (20–90)
       int turn = map(abs(diff), TRACK_CENTER_ZONE, TRACK_DIST, 20, 90);
       turn = constrain(turn, 20, 90);
 
       int fast = TRACK_FAST;
-      int slow = constrain(TRACK_FAST - turn, 0, 255);   // ลดล้อฝั่งตรงข้ามตาม diff
+      int slow = constrain(TRACK_FAST - turn, 0, 255);
 
-      if (diff > 0)   // ศัตรูอยู่ขวา → ล้อขวาช้า
-        Motors::move(fast, slow);
-      else            // ศัตรูอยู่ซ้าย → ล้อซ้ายช้า
-        Motors::move(slow, fast);
+      if (diff > 0)
+        Motors::move(fast, slow);   // ศัตรูขวา → ล้อขวาช้า
+      else
+        Motors::move(slow, fast);   // ศัตรูซ้าย → ล้อซ้ายช้า
 
     } else {
-      // sensor ข้างเจอ → เลี้ยวตายตัวเหมือนเดิม
+      // Sensor ข้างเจอ → เลี้ยวตายตัว
       if (dir == DIR_LEFT)
         Motors::move(TRACK_SLOW, TRACK_FAST);
       else
@@ -127,31 +129,29 @@ namespace {
     }
   }
 
-
-  // ── SEARCH แบบ spiral ────────────────────────────────────
-  //  เดิม: หมุนอยู่กับที่ สลับซ้าย-ขวา
-  //  ใหม่: เดินหน้าสั้นๆ (SEARCH_FWD_MS) แล้วค่อยหมุน
-  //         ทำให้ครอบคลุมพื้นที่สนามได้มากขึ้น
+  // SEARCH — หมุนค้นหาแบบ spiral
   //
-  //  pattern:
-  //    [เดินหน้า 200ms] → [หมุน 600ms] → [เดินหน้า 200ms] → ...
+  //   แต่ละรอบ (SEARCH_FWD_MS + SEARCH_SWAP_MS):
+  //     ช่วงต้น: เดินหน้า SEARCH_FWD_MS ms
+  //     ช่วงหลัง: หมุนค้นหา SEARCH_SWAP_MS ms
+  //     ครบรอบ: สลับทิศหมุน แล้วเริ่มรอบใหม่
   //
   void doSearch() {
+    const unsigned long CYCLE = SEARCH_FWD_MS + SEARCH_SWAP_MS;  // 1 รอบ = 800ms
     unsigned long elapsed = millis() - searchTimer;
-    unsigned long cycle   = SEARCH_FWD_MS + SEARCH_SWAP_MS;  // 800ms ต่อรอบ
 
-    if (elapsed >= cycle) {
-      // ครบ 1 รอบ → สลับทิศแล้วเริ่มใหม่
+    // ครบ 1 รอบ → สลับทิศ แล้วรีเซ็ต timer
+    if (elapsed >= CYCLE) {
       searchDir   = !searchDir;
       searchTimer = millis();
       elapsed     = 0;
     }
 
     if (elapsed < SEARCH_FWD_MS) {
-      // ช่วงแรกของรอบ: เดินหน้า
+      // ช่วงเดินหน้า
       Motors::move(SEARCH_SPEED, SEARCH_SPEED);
     } else {
-      // ช่วงหลัง: หมุนค้นหา
+      // ช่วงหมุน
       if (searchDir)
         Motors::move(-SEARCH_SPEED, SEARCH_SPEED);   // หมุนขวา
       else
@@ -162,7 +162,9 @@ namespace {
 } // namespace (anonymous)
 
 
-// ── public API ───────────────────────────────────────────────
+// ================================================================
+//  Public API
+// ================================================================
 
 void AI::reset() {
   escapeState = ESC_IDLE;
@@ -177,56 +179,44 @@ void AI::reset() {
 
 void AI::run(Dist dist, Line line) {
 
-  // ===========================================================
-  //  STEP 1 — ตรวจเส้น (ความสำคัญสูงสุด)
-  //           ถ้าเจอเส้นตอนไหนก็ได้ → เริ่ม escape ทันที
-  // ===========================================================
-  // แก้: เริ่ม escape ใหม่ได้เฉพาะตอน IDLE เท่านั้น
-  // ถ้าไม่ check escapeState == IDLE → escapeTimer จะ reset ซ้ำทุก loop
-  // ตราบใดที่ sensor ยังเห็นเส้น → หนีไม่สำเร็จ
+  // ── Step 1: ตรวจเส้น (ความสำคัญสูงสุด) ─────────────────────
+  // เริ่ม escape ใหม่ได้เฉพาะตอน IDLE
+  // ถ้าไม่ตรวจ escapeState → timer จะ reset ซ้ำทุก loop จนหนีไม่ออก
   if ((line.left || line.right) && escapeState == ESC_IDLE) {
     escapeState = ESC_BACK;
-    escapeLeft  = line.left;     // จำว่าเจอซ้ายหรือขวา
+    escapeLeft  = line.left;
     escapeTimer = millis();
   }
 
-  // ===========================================================
-  //  STEP 2 — ถอยหลังหนีเส้น
-  // ===========================================================
+  // ── Step 2: ถอยหลังหนีเส้น ──────────────────────────────────
   if (escapeState == ESC_BACK) {
     Motors::move(-ESCAPE_BACK, -ESCAPE_BACK);
-
     if (millis() - escapeTimer >= ESCAPE_BACK_MS) {
       escapeState = ESC_TURN;
       escapeTimer = millis();
     }
-    return;   // ไม่ทำอย่างอื่นระหว่างถอย
+    return;
   }
 
-  // ===========================================================
-  //  STEP 3 — หมุนกลับเข้าสนาม
-  //           เจอเส้นซ้าย → หมุนขวา (และกลับกัน)
-  // ===========================================================
+  // ── Step 3: หมุนกลับเข้าสนาม ────────────────────────────────
+  // เจอเส้นซ้าย → หมุนขวา (และกลับกัน)
   if (escapeState == ESC_TURN) {
     if (escapeLeft)
-      Motors::move( ESCAPE_TURN, -ESCAPE_TURN);   // หมุนขวา
+      Motors::move( ESCAPE_TURN, -ESCAPE_TURN);
     else
-      Motors::move(-ESCAPE_TURN,  ESCAPE_TURN);   // หมุนซ้าย
+      Motors::move(-ESCAPE_TURN,  ESCAPE_TURN);
 
     if (millis() - escapeTimer >= ESCAPE_TURN_MS) {
       escapeState = ESC_IDLE;
     }
-    return;   // ไม่ทำอย่างอื่นระหว่างหมุน
+    return;
   }
 
-  // ===========================================================
-  //  STEP 4 — AI ปกติ (ไม่ได้หนีเส้น)
-  // ===========================================================
+  // ── Step 4: AI ปกติ ──────────────────────────────────────────
 
+  // อัปเดต target lock ถ้าเห็นศัตรู
   TargetDir detected = detectTarget(dist);
-
   if (detected != DIR_NONE) {
-    // เจอศัตรู → อัปเดต lock
     lastTarget  = detected;
     targetTimer = millis();
   }
@@ -235,15 +225,13 @@ void AI::run(Dist dist, Line line) {
                       (millis() - targetTimer < LOCK_TIME);
 
   if (!targetLocked) {
-    // ──── SEARCH: ไม่มีข้อมูลศัตรูเลย ────
     doSearch();
     return;
   }
 
-  // ──── มีเป้าหมาย: โจมตีหรือติดตาม ────
-  if (closestFront(dist) < RAM_DIST) {
-    doAttack();                    // ใกล้พอ → พุ่ง!
-  } else {
-    doTrack(lastTarget, dist);     // ไกลอยู่ → เลี้ยวหา (proportional)
-  }
+  // มีเป้าหมาย: ตัดสินใจ Attack หรือ Track
+  if (closestFront(dist) < RAM_DIST)
+    doAttack();
+  else
+    doTrack(lastTarget, dist);
 }
