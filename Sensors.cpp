@@ -1,48 +1,31 @@
 #include "Sensors.h"
 #include "Config.h"
+#include <SharpIR.h>
 
 // ============================================================
 //  Sensors.cpp — จัดการ Sharp GP2Y0A41SK0F × 5 + sensor เส้น × 2
+//  [แบบใช้ Library SharpIR]
 //
-//  การแปลงค่า Analog → mm:
-//    Vout ของ GP2Y0A41SK0F สัมพันธ์กับระยะแบบไม่เชิงเส้น
-//    ใช้สูตร:  mm = SHARP_K / analogRead(pin)
-//    (ดัดแปลงจาก datasheet curve และ fitting จริง)
+//  ติดตั้ง library ก่อน:
+//    Arduino IDE → Library Manager → ค้นหา "SharpIR" → Install
 //
-//    ข้อควรระวัง:
-//      - ระยะ < 40 mm  → sensor ให้ค่าบิดเบน → ตัดทิ้ง (NO_TARGET)
-//      - ระยะ > 300 mm → สัญญาณอ่อนมาก    → ตัดทิ้ง (NO_TARGET)
-//      - ค่า raw = 0   → ป้องกัน divide-by-zero
-//
-//  ไม่ต้องการ:
-//    - Wire / I2C
-//    - XSHUT pin
-//    - Library พิเศษ (ใช้แค่ analogRead() มาตรฐาน)
+//  library จะจัดการแปลงค่า Analog → cm ให้อัตโนมัติ
+//  โดยใช้ curve จาก datasheet ของ GP2Y0A41SK0F
 // ============================================================
 
 namespace {
 
-  // ── แปลง analogRead → mm ────────────────────────────────
-  //   รับ pin, คืน mm หรือ NO_TARGET ถ้านอกช่วง
-  int sharpReadMM(int pin) {
+  // GP2Y0A41SK0F คือ model ที่ระบุใน SharpIR library
+  SharpIR sensorSL(SharpIR::GP2Y0A41SK0F, PIN_SHARP_SL);
+  SharpIR sensorFL(SharpIR::GP2Y0A41SK0F, PIN_SHARP_FL);
+  SharpIR sensorFC(SharpIR::GP2Y0A41SK0F, PIN_SHARP_FC);
+  SharpIR sensorFR(SharpIR::GP2Y0A41SK0F, PIN_SHARP_FR);
+  SharpIR sensorSR(SharpIR::GP2Y0A41SK0F, PIN_SHARP_SR);
 
-    // Oversample: อ่านหลายครั้งแล้วเฉลี่ย ลด noise จาก ADC
-    long sum = 0;
-    for (int i = 0; i < SHARP_SAMPLES; i++) {
-      sum += analogRead(pin);
-      delayMicroseconds(200);   // รอให้ S&H ของ ADC settle ระหว่างรอบ
-    }
-    int raw = (int)(sum / SHARP_SAMPLES);
-
-    // ป้องกัน divide-by-zero และ raw ต่ำมาก (sensor ถูกบล็อก / ไฟดับ)
-    if (raw <= 0) return NO_TARGET;
-
-    // แปลงเป็น mm ด้วยสูตร inverse
-    int mm = (int)(SHARP_K / (float)(raw + SHARP_OFFSET));
-
-    // กรองค่านอกช่วงที่เชื่อถือได้ของ GP2Y0A41SK0F
+  // ── แปลง cm → mm และกรองค่านอกช่วง ────────────────────────
+  int toMM(int cm) {
+    int mm = cm * 10;
     if (mm < SHARP_MIN_MM || mm > SHARP_MAX_MM) return NO_TARGET;
-
     return mm;
   }
 
@@ -52,10 +35,9 @@ namespace {
 // ── public API ───────────────────────────────────────────────
 
 void Sensors::begin() {
-  Serial.begin(115200);   // เปิด Serial สำหรับ debug
+  Serial.begin(115200);
 
-  // Sharp GP2Y เป็น Analog OUTPUT — ตั้งเป็น INPUT เพื่อ analogRead
-  // (Arduino Uno/Nano: A0–A5 เป็น INPUT by default แต่ตั้งชัดเจนไว้ดีกว่า)
+  // Sharp GP2Y เป็น Analog — ตั้ง pin เป็น INPUT
   pinMode(PIN_SHARP_SL, INPUT);
   pinMode(PIN_SHARP_FL, INPUT);
   pinMode(PIN_SHARP_FC, INPUT);
@@ -66,17 +48,18 @@ void Sensors::begin() {
   pinMode(PIN_LINE_L, INPUT);
   pinMode(PIN_LINE_R, INPUT);
 
-  Serial.println(F("[Sensors] Sharp GP2Y0A41SK0F x5 ready (Analog mode)"));
+  Serial.println(F("[Sensors] SharpIR library x5 ready"));
 }
 
 
 Dist Sensors::readDist() {
   Dist d;
-  d.sl = sharpReadMM(PIN_SHARP_SL);
-  d.fl = sharpReadMM(PIN_SHARP_FL);
-  d.fc = sharpReadMM(PIN_SHARP_FC);
-  d.fr = sharpReadMM(PIN_SHARP_FR);
-  d.sr = sharpReadMM(PIN_SHARP_SR);
+  // distance() คืนค่า cm → แปลงเป็น mm ด้วย toMM()
+  d.sl = toMM(sensorSL.distance());
+  d.fl = toMM(sensorFL.distance());
+  d.fc = toMM(sensorFC.distance());
+  d.fr = toMM(sensorFR.distance());
+  d.sr = toMM(sensorSR.distance());
   return d;
 }
 
@@ -85,7 +68,7 @@ Line Sensors::readLine() {
   Line l;
   l.leftRaw  = analogRead(PIN_LINE_L);
   l.rightRaw = analogRead(PIN_LINE_R);
-  l.left     = l.leftRaw  > LINE_L_TH;   // ค่าสูง = เจอเส้นขาว
-  l.right    = l.rightRaw > LINE_R_TH;   // ค่าสูง = เจอเส้นขาว
+  l.left     = l.leftRaw  > LINE_L_TH;
+  l.right    = l.rightRaw > LINE_R_TH;
   return l;
 }
