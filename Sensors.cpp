@@ -1,3 +1,4 @@
+#include <Arduino.h>
 #include "Sensors.h"
 #include "Config.h"
 #include <SharpIR.h>
