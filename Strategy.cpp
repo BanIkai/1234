@@ -111,8 +111,8 @@ namespace {
   //
   //  กรณี 1: sensor หน้ากลาง (fc) เห็น → คำนวณจาก fl และ fr
   //    diff = fl - fr
-  //      ถ้า diff บวก = ศัตรูอยู่ขวา → ลดความเร็วล้อขวา
-  //      ถ้า diff ลบ  = ศัตรูอยู่ซ้าย → ลดความเร็วล้อซ้าย
+  //      ถ้า diff บวก = fl น้อยกว่า fr → sensor ซ้ายเห็นใกล้กว่า → ศัตรูอยู่ซ้าย → เลี้ยวซ้าย
+  //      ถ้า diff ลบ  = fr น้อยกว่า fl → sensor ขวาเห็นใกล้กว่า → ศัตรูอยู่ขวา  → เลี้ยวขวา
   //      ยิ่ง diff มาก = เลี้ยวแรงขึ้น
   //
   //  กรณี 2: sensor ข้างเจอ (fc ไม่เห็น) → ใช้ความเร็วตายตัว
@@ -121,7 +121,9 @@ namespace {
 
     if (d.fc < TRACK_DIST) {
       // === Proportional Steering ===
-      int diff = d.fl - d.fr;   // บวก = ศัตรูเอียงขวา, ลบ = เอียงซ้าย
+      // diff บวก = fl น้อย = sensor ซ้ายใกล้ศัตรูกว่า = ศัตรูอยู่ซ้าย
+      // diff ลบ  = fr น้อย = sensor ขวาใกล้ศัตรูกว่า = ศัตรูอยู่ขวา
+      int diff = d.fl - d.fr;
 
       if (abs(diff) < TRACK_CENTER_ZONE) {
         Motors::move(TRACK_FAST, TRACK_FAST);
@@ -135,9 +137,9 @@ namespace {
       int slow = constrain(TRACK_FAST - turn, 0, 255);
 
       if (diff > 0)
-        Motors::move(fast, slow);   // ศัตรูอยู่ขวา → ล้อขวาช้า = เลี้ยวขวา
+        Motors::move(slow, fast);   // ศัตรูอยู่ซ้าย → ล้อซ้ายช้า = เลี้ยวซ้าย  [FIX #5]
       else
-        Motors::move(slow, fast);   // ศัตรูอยู่ซ้าย → ล้อซ้ายช้า = เลี้ยวซ้าย
+        Motors::move(fast, slow);   // ศัตรูอยู่ขวา  → ล้อขวาช้า = เลี้ยวขวา   [FIX #5]
 
     } else {
       // === Fixed Speed (sensor ข้างเจอ) ===
@@ -250,6 +252,7 @@ void AI::run(Dist dist, Line line) {
       escapeState = ESC_IDLE;
       searchTimer = millis();  // [FIX #4] reset searchTimer ทันทีที่กลับเป็น IDLE
                                // ป้องกัน elapsed ค้างค่าเก่า → phase ค้นหาผิด
+      return;                  // [FIX #6] return ทันที ไม่ให้ไหลเข้า AI ปกติในรอบเดียวกัน
     }
     return;
   }
