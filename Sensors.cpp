@@ -29,6 +29,16 @@ namespace {
   SharpIR sensorSR(SharpIR::GP2Y0A41SK0F, PIN_SHARP_SR);
 
 
+  // อ่านค่าจาก sensor หลายครั้งแล้วเฉลี่ย เพื่อลด noise
+  // SHARP_SAMPLES กำหนดใน Config.h (ค่าเริ่มต้น = 3)
+  int readAverage(SharpIR& sensor) {
+    long sum = 0;
+    for (int i = 0; i < SHARP_SAMPLES; i++) {
+      sum += sensor.distance();
+    }
+    return (int)(sum / SHARP_SAMPLES);
+  }
+
   // แปลงค่าจาก cm → mm และกรองค่านอกช่วงที่เชื่อถือได้ออก
   //
   // ทำไมต้องกรอง? เพราะ sensor นี้วัดแม่นแค่ 40–300 mm
@@ -71,11 +81,11 @@ void Sensors::begin() {
 // .distance() คืนค่าเป็น cm จากนั้นเรา toMM() แปลงเป็น mm
 Dist Sensors::readDist() {
   Dist d;
-  d.sl = toMM(sensorSL.distance());
-  d.fl = toMM(sensorFL.distance());
-  d.fc = toMM(sensorFC.distance());
-  d.fr = toMM(sensorFR.distance());
-  d.sr = toMM(sensorSR.distance());
+  d.sl = toMM(readAverage(sensorSL));
+  d.fl = toMM(readAverage(sensorFL));
+  d.fc = toMM(readAverage(sensorFC));
+  d.fr = toMM(readAverage(sensorFR));
+  d.sr = toMM(readAverage(sensorSR));
   return d;
 }
 

@@ -81,7 +81,8 @@ namespace {
   TargetDir detectTarget(const Dist& d) {
     if (d.fc < TRACK_DIST) {
       // เห็นหน้ากลาง → เปรียบ fl กับ fr ว่าศัตรูเอียงไปทางไหน
-      return (d.fl <= d.fr) ? DIR_LEFT : DIR_RIGHT;
+      if (abs(d.fl - d.fr) < TRACK_CENTER_ZONE) return DIR_NONE;  // ตรงหน้าพอดี → ไม่ต้องเลี้ยว
+      return (d.fl < d.fr) ? DIR_LEFT : DIR_RIGHT;  // ใกล้ซ้ายกว่า = ศัตรูอยู่ซ้าย
     }
     if (d.fl < TRACK_DIST) return DIR_LEFT;
     if (d.fr < TRACK_DIST) return DIR_RIGHT;
@@ -218,8 +219,18 @@ void AI::run(Dist dist, Line line) {
   //
   if ((line.left || line.right) && escapeState == ESC_IDLE) {
     escapeState = ESC_BACK;
-    escapeLeft  = line.left;   // จำว่าเจอเส้นซ้าย (ใช้ตอนตัดสินใจหมุน)
-    escapeTimer = millis();    // เริ่มจับเวลา
+    escapeTimer = millis();
+
+    // ตัดสินใจทิศหมุนกลับ
+    // เจอซ้ายอย่างเดียว → หมุนขวา (escapeLeft = true)
+    // เจอขวาอย่างเดียว → หมุนซ้าย (escapeLeft = false)
+    // เจอทั้งคู่         → random เพื่อไม่ให้ติดแบบเดิมทุกครั้ง
+    if (line.left && !line.right)
+      escapeLeft = true;
+    else if (line.right && !line.left)
+      escapeLeft = false;
+    else
+      escapeLeft = (random(2) == 0);
   }
 
   // ============================================================
